@@ -1,0 +1,39 @@
+[package]
+name = "btc-ticker"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name"]
+description = "A simple tray icon application"
+
+[dependencies]
+tray-icon = "0.21.0"
+tao = "0.34.0"
+image = "0.25.5"
+
+# For cross-platform event handling
+crossbeam-channel = "0.5"
+
+# For HTTP requests
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+
+# For JSON parsing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# For error handling
+anyhow = "1.0"
+
+# GUI dependencies
+eframe = "0.27.0" # egui framework wrapper
+egui = "0.27.0"  # immediate mode GUI library
+
+# For time formatting
+chrono = "0.4"
+
+# MacOS-specific dependencies
+[target."cfg(target_os = \"macos\")".dependencies]
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+
+[target."cfg(target_os = \"linux\")".dependencies]
+gtk = "0.18.0"
