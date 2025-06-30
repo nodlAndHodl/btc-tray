@@ -2,8 +2,8 @@
 name = "btc-ticker"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name"]
-description = "A simple tray icon application"
+authors = ["Nick"]
+description = "A tray application for Bitcoin metrics"
 
 [dependencies]
 tray-icon = "0.21.0"

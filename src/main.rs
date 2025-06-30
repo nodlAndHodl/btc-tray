@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use anyhow::Result;
 use serde::Deserialize;
-use egui_plot::{Plot, BoxElem, BoxPlot, BoxSpread, Legend, Corner};
+use egui_plot::{Plot, BoxPlot, BoxElem, BoxSpread, Corner, Legend};
 use chrono::{DateTime, Utc, TimeZone, Timelike};
 
 use tray_icon::{
@@ -17,11 +17,7 @@ use eframe::egui;
 
 #[derive(Debug, Deserialize)]
 struct BitstampResponse {
-    last: String,      // Price is returned as a string in Bitstamp API
-    high: String,      // Highest price in last 24h
-    low: String,       // Lowest price in last 24h
-    volume: String,    // Volume in last 24h
-    timestamp: String, // Server timestamp
+    last: String,
 }
 
 // Structure for historical data from Bitstamp
@@ -43,7 +39,6 @@ struct OhlcDataPoint {
     high: String,        // Highest price
     low: String,         // Lowest price
     close: String,       // Closing price
-    volume: String,      // Trading volume
 }
 
 // For debugging
@@ -55,13 +50,6 @@ fn print_historical_data(data: &BitstampHistoricalData) {
     }
 }
 
-// Used for the original event system
-enum UserEvent {
-    TrayIconEvent(tray_icon::TrayIconEvent),
-    MenuEvent(tray_icon::menu::MenuEvent),
-    RefreshPrice,
-}
-
 // Shared state between the tray icon and the egui app
 struct BitcoinState {
     price: f64,
@@ -70,7 +58,7 @@ struct BitcoinState {
     // Add a flag to indicate when a new price has been fetched
     new_price_fetched: bool,
     // Store historical data as OHLC (Open, High, Low, Close)
-    historical_data: Vec<(String, CandleData)>,
+    historical_data: Vec<(TimeInfo, CandleData)>,
 }
 
 // Structure to hold candlestick data
@@ -80,6 +68,21 @@ struct CandleData {
     high: f64,
     low: f64,
     close: f64,
+}
+
+// Structure to hold formatted timestamp info
+#[derive(Debug, Clone)]
+struct TimeInfo {
+    raw_timestamp: i64,      // Raw Unix timestamp
+    formatted_time: String,  // Human-readable formatted time
+    rfc3339: String,         // RFC3339 format for internal use
+}
+
+// Implement Display trait for TimeInfo to use in format strings
+impl std::fmt::Display for TimeInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.formatted_time)
+    }
 }
 
 impl BitcoinState {
@@ -97,15 +100,13 @@ impl BitcoinState {
 // The egui application
 struct BitcoinApp {
     state: Arc<Mutex<BitcoinState>>,
-    show_history: bool,
-    price_history: Vec<(String, CandleData)>,
+    price_history: Vec<(TimeInfo, CandleData)>,
 }
 
 impl BitcoinApp {
     fn new(state: Arc<Mutex<BitcoinState>>) -> Self {
         Self {
             state,
-            show_history: true,  // Show history by default
             price_history: Vec::new(),
         }
     }
@@ -115,11 +116,11 @@ impl BitcoinApp {
         
         // First check if we need to load initial historical data
         if self.price_history.is_empty() && !state.historical_data.is_empty() {
-            println!("Loading {} historical data points into chart", state.historical_data.len());
+            //println!("Loading {} historical data points into chart", state.historical_data.len());
             // Initialize with historical data
             self.price_history = state.historical_data.clone();
         } else if !state.historical_data.is_empty() {
-            println!("Updating with {} historical data points", state.historical_data.len());
+            //println!("Updating with {} historical data points", state.historical_data.len());
             // Update with newest historical data
             self.price_history = state.historical_data.clone();
         }
@@ -134,8 +135,15 @@ impl BitcoinApp {
                 close: state.price,
             };
             
-            // Add to history
-            self.price_history.push((state.last_updated.clone(), candle));
+            // Add to history with proper TimeInfo struct
+            let now = chrono::Utc::now();
+            let timestamp = now.timestamp();
+            let time_info = TimeInfo {
+                raw_timestamp: timestamp,
+                formatted_time: state.last_updated.clone(), // Use the existing formatted time
+                rfc3339: now.to_rfc3339(),
+            };
+            self.price_history.push((time_info, candle));
             
             // Keep only last 100 entries
             if self.price_history.len() > 100 {
@@ -154,7 +162,7 @@ impl eframe::App for BitcoinApp {
         self.update_price_history();
         
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Bitcoin Price Tracker");
+            ui.heading("Bitcoin Metrics");
             
             let state = self.state.lock().unwrap();
             let price_text = if state.price > 0.0 {
@@ -179,11 +187,10 @@ impl eframe::App for BitcoinApp {
             }
             
             ui.add_space(20.0);
-            ui.checkbox(&mut self.show_history, "Show Price History");
             
-            if self.show_history && !self.price_history.is_empty() {
+            if !self.price_history.is_empty() {
                 ui.add_space(10.0);
-                ui.label("Bitcoin Price History:");
+                ui.label("Bitcoin Price History (24 hours):");
                 ui.add_space(5.0);
                 
                 // Create plot data
@@ -192,47 +199,38 @@ impl eframe::App for BitcoinApp {
                     let mut candles = Vec::with_capacity(self.price_history.len());
                     
                     // Calculate x-axis values (time elapsed in minutes from first data point)
-                    if let Some((first_time_str, _)) = self.price_history.first() {
-                        if let Ok(first_time) = DateTime::parse_from_rfc3339(first_time_str) {
-                            for (time_str, candle_data) in self.price_history.iter() {
-                                if let Ok(timestamp) = DateTime::parse_from_rfc3339(time_str) {
-                                    let elapsed_secs = (timestamp.timestamp() - first_time.timestamp()) as f64;
-                                    let elapsed_mins = elapsed_secs / 60.0;
-                                    // Parse the timestamp for display purposes
-                                    let formatted_date = if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
-                                        // Get hours and minutes for the label
-                                        format!("{:02}:{:02}", dt.hour(), dt.minute())
-                                    } else {
-                                        "Unknown".to_string()
-                                    };
-                                    
-                                    // Store the formatted time for use in the plot
-                                    let _formatted_time = formatted_date.clone();
-                                    
-                                    // Use timestamp directly (as seconds since epoch) for x-axis position
+                    if let Some((first_time_info, _)) = self.price_history.first() {
+                        if let Ok(first_time) = DateTime::parse_from_rfc3339(&first_time_info.rfc3339) {
+                            for (time_info, candle_data) in self.price_history.iter() {
+                                if let Ok(timestamp) = DateTime::parse_from_rfc3339(&time_info.rfc3339) {
+                                   // Use timestamp directly (as seconds since epoch) for x-axis position
                                     // Convert i64 timestamp to f64 for plotting
-                                    let plot_x = timestamp.timestamp() as f64;
+                                    let plot_x = time_info.raw_timestamp as f64;
                                     
                                     // For proper candlestick chart, the x-position is time and y values are price
                                     let box_elem = BoxElem::new(
                                         plot_x,  // x position (timestamp as f64)
                                         BoxSpread::new(
                                             candle_data.low,       // lowest price (bottom whisker)
-                                            if candle_data.open < candle_data.close { candle_data.open } else { candle_data.close }, // box bottom
-                                            (candle_data.high + candle_data.low) / 2.0, // median
-                                            if candle_data.open > candle_data.close { candle_data.open } else { candle_data.close }, // box top 
+                                            candle_data.open,      // box bottom - ALWAYS the open price
+                                            (candle_data.open + candle_data.close) / 2.0, // median - midpoint between open and close
+                                            candle_data.close,     // box top - ALWAYS the close price
                                             candle_data.high       // highest price (top whisker)
                                         )
                                     )
-                                    .whisker_width(0.5)  // Width of the whiskers relative to the box
-                                    .box_width(0.7)      // Width of the box/body
+                                    .whisker_width(0.8)  // Width of the whiskers relative to the box
+                                    .box_width(2.2)      // Width of the box/body
                                     // Color the candle based on whether price went up or down
                                     .fill(if candle_data.close >= candle_data.open {
                                         egui::Color32::from_rgb(0, 200, 0) // Brighter green for price up
                                     } else {
                                         egui::Color32::from_rgb(200, 0, 0)  // Brighter red for price down
                                     })
-                                    .stroke(egui::Stroke::new(1.5, egui::Color32::WHITE)); // Add white outline
+                                    .stroke(if candle_data.close >= candle_data.open {
+                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 0)) // Green stroke for price up
+                                    } else {
+                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 0, 0)) // Red stroke for price down
+                                    }); // Outline color matches fill color
                                     
                                     candles.push(box_elem);
                                 }
@@ -242,7 +240,7 @@ impl eframe::App for BitcoinApp {
                     
                     // Only display chart if we have valid candles
                     if !candles.is_empty() {
-                        println!("Created {} candles for chart", candles.len());
+                        //println!("Created {} candles for chart", candles.len());
                         
                         // Create a named box plot with the candles
                         let box_plot = BoxPlot::new("BTC/USD", candles);
@@ -280,8 +278,8 @@ impl eframe::App for BitcoinApp {
                             .allow_scroll(true)
                             .allow_drag(true)
                             .min_size(egui::vec2(400.0, 250.0)) // Set minimum chart size
-                            .include_y(0.0)    // Always include zero on y-axis
-                            .y_axis_min_width(2.0)   // Make y-axis more visible
+                            // .include_y(0.0)    // Always include zero on y-axis
+                            .y_axis_min_width(0.5)   // Make y-axis more visible
                             .y_axis_label("Price (USD)")
                             .x_axis_label("Time (UTC)")
                             .label_formatter(time_formatter)
@@ -294,15 +292,6 @@ impl eframe::App for BitcoinApp {
                                 plot_ui.box_plot(box_plot);
                             });
                     }
-                    
-                    // Also show as list below the chart
-                    ui.add_space(10.0);
-                    ui.label("Recent Price Updates:");
-                    egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                        for (time, price) in self.price_history.iter().rev().take(10) {
-                            ui.label(format!("{}: ${:.2}", time, price.close));
-                        }
-                    });
                 }
             }
         });
@@ -356,9 +345,14 @@ fn main() -> Result<(), eframe::Error> {
                     
                     // Convert unix timestamp to ISO 8601
                     if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
-                        let formatted_time = datetime.to_rfc3339();
+                        let rfc3339 = datetime.to_rfc3339();
+                        let formatted_time = format_unix_timestamp(&point.timestamp);
                         println!("  Formatted time: {}", formatted_time);
-                        history.push((formatted_time, candle));
+                        history.push((TimeInfo {
+                            raw_timestamp: timestamp,
+                            formatted_time,
+                            rfc3339,
+                        }, candle));
                     } else {
                         println!("  Invalid timestamp: {}", timestamp);
                     }
@@ -418,7 +412,7 @@ fn main() -> Result<(), eframe::Error> {
             let state_for_menu_events = linux_state.clone();
             
             // Add items to the menu
-            tray_menu.append_items(&[
+            let _ =tray_menu.append_items(&[
                 &PredefinedMenuItem::about(
                     None,
                     Some(AboutMetadata {
@@ -476,11 +470,11 @@ fn main() -> Result<(), eframe::Error> {
     // Run the egui application
     let app_state = bitcoin_state.clone();
     eframe::run_native(
-        "Bitcoin Price Tracker",
+        "Bitcoin Metrics",
         eframe::NativeOptions {
             // Use viewport to set the window size in newer eframe versions
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([360.0, 480.0]),
+                .with_inner_size([700.0, 480.0]), // Match chart width (250px height * 2.5 aspect ratio)
             ..Default::default()
         },
         Box::new(move |_cc| {
@@ -584,8 +578,6 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
                 point.close.parse::<f64>()
             ) {
                 if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
-                    let formatted_time = datetime.to_rfc3339();
-                    
                     // Create candle data structure
                     let candle = CandleData {
                         open,
@@ -594,7 +586,14 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
                         close
                     };
                     
-                    history.push((formatted_time, candle));
+                    // Also log the human-readable time for debugging
+                    let human_time: String = format_unix_timestamp(&point.timestamp);
+                    
+                    history.push((TimeInfo {
+                        raw_timestamp: timestamp,
+                        formatted_time: human_time,
+                        rfc3339: datetime.to_rfc3339(),
+                    }, candle));
                 }
             }
         }
@@ -619,6 +618,21 @@ fn fetch_bitcoin_price() -> Result<f64> {
     Ok(price)
 }
 
+// Helper function to format Unix timestamp to date-time format (YYYY-MM-DD HH:MM)
+fn format_unix_timestamp(unix_timestamp_str: &str) -> String {
+    match unix_timestamp_str.parse::<i64>() {
+        Ok(unix_timestamp) => {
+            if let Some(datetime) = Utc.timestamp_opt(unix_timestamp, 0).single() {
+                // Format as date and time (YYYY-MM-DD HH:MM)
+                datetime.format("%Y-%m-%d %H:%M").to_string()
+            } else {
+                "Invalid time".to_string()
+            }
+        },
+        Err(_) => "Invalid timestamp".to_string(),
+    }
+}
+
 fn fetch_historical_bitcoin_prices() -> Result<BitstampHistoricalData> {
     // Use Bitstamp API to get hourly BTC/USD historical data for the last 24 hours
     // step=3600 means hourly data (3600 seconds = 1 hour)
@@ -633,6 +647,12 @@ fn fetch_historical_bitcoin_prices() -> Result<BitstampHistoricalData> {
     match serde_json::from_str::<BitstampHistoricalData>(&response_text) {
         Ok(data) => {
             println!("Successfully parsed historical data");
+            // Print a sample of formatted timestamps
+            if !data.data.ohlc.is_empty() {
+                let sample_timestamp = &data.data.ohlc[0].timestamp;
+                let formatted = format_unix_timestamp(sample_timestamp);
+                println!("Sample timestamp: {} formatted as: {}", sample_timestamp, formatted);
+            }
             Ok(data)
         },
         Err(e) => {
