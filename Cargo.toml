@@ -26,6 +26,7 @@ anyhow = "1.0"
 # GUI dependencies
 eframe = "0.27.0" # egui framework wrapper
 egui = "0.27.0"  # immediate mode GUI library
+egui_plot = "0.27.0" # For plotting charts
 
 # For time formatting
 chrono = "0.4"

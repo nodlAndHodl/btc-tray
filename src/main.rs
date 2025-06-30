@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use anyhow::Result;
 use serde::Deserialize;
+use egui_plot::{Line, Plot, PlotPoints};
+use chrono::{DateTime, Utc, NaiveDateTime, TimeZone};
 
 use tray_icon::{
     menu::{AboutMetadata, MenuItem, PredefinedMenuItem},
@@ -22,6 +24,37 @@ struct BitstampResponse {
     timestamp: String, // Server timestamp
 }
 
+// Structure for historical data from Bitstamp
+#[derive(Debug, Deserialize)]
+struct BitstampHistoricalData {
+    data: BitstampDataInner,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitstampDataInner {
+    pair: String,
+    ohlc: Vec<OhlcDataPoint>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OhlcDataPoint {
+    timestamp: String,   // Unix timestamp
+    open: String,        // Opening price
+    high: String,        // Highest price
+    low: String,         // Lowest price
+    close: String,       // Closing price
+    volume: String,      // Trading volume
+}
+
+// For debugging
+fn print_historical_data(data: &BitstampHistoricalData) {
+    println!("Historical data points: {}", data.data.ohlc.len());
+    println!("Pair: {}", data.data.pair);
+    for (i, point) in data.data.ohlc.iter().enumerate().take(5) {
+        println!("Point {}: timestamp={}, close={}", i, point.timestamp, point.close);
+    }
+}
+
 // Used for the original event system
 enum UserEvent {
     TrayIconEvent(tray_icon::TrayIconEvent),
@@ -34,6 +67,22 @@ struct BitcoinState {
     price: f64,
     last_updated: String,
     updating: bool,
+    // Add a flag to indicate when a new price has been fetched
+    new_price_fetched: bool,
+    // Store historical data
+    historical_data: Vec<(String, f64)>,
+}
+
+impl BitcoinState {
+    fn new() -> Self {
+        Self {
+            price: 0.0,
+            last_updated: "Not yet updated".to_string(),
+            updating: false,
+            new_price_fetched: false,
+            historical_data: Vec::new(),
+        }
+    }
 }
 
 // The egui application
@@ -47,21 +96,32 @@ impl BitcoinApp {
     fn new(state: Arc<Mutex<BitcoinState>>) -> Self {
         Self {
             state,
-            show_history: false,
+            show_history: true,  // Show history by default
             price_history: Vec::new(),
         }
     }
 
     fn update_price_history(&mut self) {
-        let state = self.state.lock().unwrap();
-        if state.price > 0.0 && !state.updating {
-            // Only add to history if we have a valid price and not currently updating
+        let mut state = self.state.lock().unwrap();
+        
+        // First check if we need to load initial historical data
+        if self.price_history.is_empty() && !state.historical_data.is_empty() {
+            // Initialize with historical data
+            self.price_history = state.historical_data.clone();
+        }
+        
+        // Then check for new price updates
+        if state.new_price_fetched {
+            // Add to history
             self.price_history.push((state.last_updated.clone(), state.price));
             
             // Keep only last 100 entries
             if self.price_history.len() > 100 {
                 self.price_history.remove(0);
             }
+            
+            // Reset the flag
+            state.new_price_fetched = false;
         }
     }
 }
@@ -100,14 +160,61 @@ impl eframe::App for BitcoinApp {
             
             if self.show_history && !self.price_history.is_empty() {
                 ui.add_space(10.0);
-                ui.label("Price History:");
+                ui.label("Bitcoin Price History:");
                 ui.add_space(5.0);
                 
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for (time, price) in self.price_history.iter().rev() {
-                        ui.label(format!("{}: ${:.2}", time, price));
+                // Create plot data
+                if !self.price_history.is_empty() {
+                    // Create plot points from price history
+                    let mut plot_points = Vec::with_capacity(self.price_history.len());
+                    
+                    // Calculate x-axis values (time elapsed in minutes from first data point)
+                    if let Some((first_time_str, _)) = self.price_history.first() {
+                        if let Ok(first_time) = DateTime::parse_from_rfc3339(first_time_str) {
+                            for (i, (time_str, price)) in self.price_history.iter().enumerate() {
+                                if let Ok(timestamp) = DateTime::parse_from_rfc3339(time_str) {
+                                    let elapsed_secs = (timestamp.timestamp() - first_time.timestamp()) as f64;
+                                    let elapsed_mins = elapsed_secs / 60.0;
+                                    plot_points.push([elapsed_mins, *price]);
+                                }
+                            }
+                        }
                     }
-                });
+                    
+                    // Only display chart if we have valid points
+                    if !plot_points.is_empty() {
+                        let line = Line::new(PlotPoints::from(plot_points))
+                            .width(2.0)
+                            .color(egui::Color32::from_rgb(0, 150, 200));
+                        
+                        // Display the plot
+                        Plot::new("btc_price_history")
+                            .view_aspect(3.0)
+                            .height(200.0)
+                            .show_axes([true, true])
+                            .label_formatter(
+                                |name, value| {
+                                    if name == "btc_price_history" {
+                                        format!("Time: {:.1} min, Price: ${:.2}", value.x, value.y)
+                                    } else {
+                                        format!("${:.2}", value.y)
+                                    }
+                                }
+                            )
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(line);
+                            });
+                    }
+                    
+                    // Also show as list below the chart
+                    ui.add_space(10.0);
+                    ui.label("Recent Price Updates:");
+                    egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                        for (time, price) in self.price_history.iter().rev().take(10) {
+                            ui.label(format!("{}: ${:.2}", time, price));
+                        }
+                    });
+                }
             }
         });
         
@@ -121,15 +228,61 @@ fn main() -> Result<(), eframe::Error> {
     let icon = load_icon(std::path::Path::new(path));
 
     // Create shared state
-    let bitcoin_state = Arc::new(Mutex::new(BitcoinState {
-        price: 0.0,
-        last_updated: "Not yet updated".to_string(),
-        updating: false,
-    }));
+    let bitcoin_state = Arc::new(Mutex::new(BitcoinState::new()));
     
-    // Get initial price
+    // Fetch historical data and initial price
     let init_state = bitcoin_state.clone();
+    
     thread::spawn(move || {
+        // First try to get historical data
+        if let Ok(historical_data) = fetch_historical_bitcoin_prices() {
+            // Print debug info about the data
+            print_historical_data(&historical_data);
+            
+            // Process historical data
+            let mut history = Vec::new();
+            
+            // Convert historical data to our format
+            for point in historical_data.data.ohlc.iter() {
+                // Debug print point
+                println!("Processing point: timestamp={}, close={}", point.timestamp, point.close);
+                
+                if let (Ok(timestamp), Ok(price)) = (
+                    point.timestamp.parse::<i64>(),
+                    point.close.parse::<f64>()
+                ) {
+                    // Debug timestamp parsing
+                    println!("  Parsed timestamp: {}", timestamp);
+                    
+                    // Convert unix timestamp to ISO 8601
+                    if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
+                        let formatted_time = datetime.to_rfc3339();
+                        println!("  Formatted time: {}", formatted_time);
+                        history.push((formatted_time, price));
+                    } else {
+                        println!("  Invalid timestamp: {}", timestamp);
+                    }
+                } else {
+                    println!("  Failed to parse timestamp or price");
+                }
+            }
+            
+            println!("Total processed history points: {}", history.len());
+            
+            // Store the historical data in the app state
+            if !history.is_empty() {
+                let mut state = init_state.lock().unwrap();
+                state.historical_data = history;
+                
+                // Set the current price from the latest historical data point
+                if let Some((_, latest_price)) = state.historical_data.last() {
+                    state.price = *latest_price;
+                    state.last_updated = get_current_timestamp();
+                }
+            }
+        }
+        
+        // Then get the current price
         refresh_bitcoin_price(init_state);
     });
 
@@ -297,6 +450,12 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
         Ok(price) => {
             println!("Updated BTC price: ${:.2}", price);
             let mut state = state.lock().unwrap();
+            
+            // Set flag if price changed
+            if state.price != price {
+                state.new_price_fetched = true;
+            }
+            
             state.price = price;
             state.last_updated = get_current_timestamp();
             state.updating = false;
@@ -318,4 +477,27 @@ fn fetch_bitcoin_price() -> Result<f64> {
     // Convert the price string to a float
     let price = response.last.parse::<f64>()?;
     Ok(price)
+}
+
+fn fetch_historical_bitcoin_prices() -> Result<BitstampHistoricalData> {
+    // Use Bitstamp API to get hourly BTC/USD historical data for the last 24 hours
+    // step=3600 means hourly data (3600 seconds = 1 hour)
+    // limit=24 means last 24 hours
+    let url = "https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=3600&limit=24";
+    println!("Fetching historical data from: {}", url);
+    
+    let response_text = reqwest::blocking::get(url)?.text()?;
+    println!("Response text sample: {}", &response_text[..std::cmp::min(200, response_text.len())]);
+    
+    // Try to parse the JSON
+    match serde_json::from_str::<BitstampHistoricalData>(&response_text) {
+        Ok(data) => {
+            println!("Successfully parsed historical data");
+            Ok(data)
+        },
+        Err(e) => {
+            eprintln!("Error parsing historical data: {}", e);
+            Err(anyhow::anyhow!("Failed to parse historical data: {}", e))
+        }
+    }
 }
