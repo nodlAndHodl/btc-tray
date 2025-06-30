@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use anyhow::Result;
 use serde::Deserialize;
-use egui_plot::{Line, Plot, PlotPoints};
-use chrono::{DateTime, Utc, NaiveDateTime, TimeZone};
+use egui_plot::{Plot, BoxElem, BoxPlot, BoxSpread, Legend, Corner};
+use chrono::{DateTime, Utc, TimeZone, Timelike};
 
 use tray_icon::{
     menu::{AboutMetadata, MenuItem, PredefinedMenuItem},
@@ -69,15 +69,24 @@ struct BitcoinState {
     updating: bool,
     // Add a flag to indicate when a new price has been fetched
     new_price_fetched: bool,
-    // Store historical data
-    historical_data: Vec<(String, f64)>,
+    // Store historical data as OHLC (Open, High, Low, Close)
+    historical_data: Vec<(String, CandleData)>,
+}
+
+// Structure to hold candlestick data
+#[derive(Debug, Clone, Copy)]
+struct CandleData {
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
 }
 
 impl BitcoinState {
     fn new() -> Self {
-        Self {
+        BitcoinState {
             price: 0.0,
-            last_updated: "Not yet updated".to_string(),
+            last_updated: String::new(),
             updating: false,
             new_price_fetched: false,
             historical_data: Vec::new(),
@@ -89,7 +98,7 @@ impl BitcoinState {
 struct BitcoinApp {
     state: Arc<Mutex<BitcoinState>>,
     show_history: bool,
-    price_history: Vec<(String, f64)>,
+    price_history: Vec<(String, CandleData)>,
 }
 
 impl BitcoinApp {
@@ -106,14 +115,27 @@ impl BitcoinApp {
         
         // First check if we need to load initial historical data
         if self.price_history.is_empty() && !state.historical_data.is_empty() {
+            println!("Loading {} historical data points into chart", state.historical_data.len());
             // Initialize with historical data
+            self.price_history = state.historical_data.clone();
+        } else if !state.historical_data.is_empty() {
+            println!("Updating with {} historical data points", state.historical_data.len());
+            // Update with newest historical data
             self.price_history = state.historical_data.clone();
         }
         
         // Then check for new price updates
         if state.new_price_fetched {
+            // Create candle data from current price (open = high = low = close for current price)
+            let candle = CandleData {
+                open: state.price,
+                high: state.price,
+                low: state.price,
+                close: state.price,
+            };
+            
             // Add to history
-            self.price_history.push((state.last_updated.clone(), state.price));
+            self.price_history.push((state.last_updated.clone(), candle));
             
             // Keep only last 100 entries
             if self.price_history.len() > 100 {
@@ -124,6 +146,7 @@ impl BitcoinApp {
             state.new_price_fetched = false;
         }
     }
+
 }
 
 impl eframe::App for BitcoinApp {
@@ -165,44 +188,110 @@ impl eframe::App for BitcoinApp {
                 
                 // Create plot data
                 if !self.price_history.is_empty() {
-                    // Create plot points from price history
-                    let mut plot_points = Vec::with_capacity(self.price_history.len());
+                    // Create candlestick elements for the chart
+                    let mut candles = Vec::with_capacity(self.price_history.len());
                     
                     // Calculate x-axis values (time elapsed in minutes from first data point)
                     if let Some((first_time_str, _)) = self.price_history.first() {
                         if let Ok(first_time) = DateTime::parse_from_rfc3339(first_time_str) {
-                            for (i, (time_str, price)) in self.price_history.iter().enumerate() {
+                            for (time_str, candle_data) in self.price_history.iter() {
                                 if let Ok(timestamp) = DateTime::parse_from_rfc3339(time_str) {
                                     let elapsed_secs = (timestamp.timestamp() - first_time.timestamp()) as f64;
                                     let elapsed_mins = elapsed_secs / 60.0;
-                                    plot_points.push([elapsed_mins, *price]);
+                                    // Parse the timestamp for display purposes
+                                    let formatted_date = if let Ok(dt) = DateTime::parse_from_rfc3339(time_str) {
+                                        // Get hours and minutes for the label
+                                        format!("{:02}:{:02}", dt.hour(), dt.minute())
+                                    } else {
+                                        "Unknown".to_string()
+                                    };
+                                    
+                                    // Store the formatted time for use in the plot
+                                    let _formatted_time = formatted_date.clone();
+                                    
+                                    // Use timestamp directly (as seconds since epoch) for x-axis position
+                                    // Convert i64 timestamp to f64 for plotting
+                                    let plot_x = timestamp.timestamp() as f64;
+                                    
+                                    // For proper candlestick chart, the x-position is time and y values are price
+                                    let box_elem = BoxElem::new(
+                                        plot_x,  // x position (timestamp as f64)
+                                        BoxSpread::new(
+                                            candle_data.low,       // lowest price (bottom whisker)
+                                            if candle_data.open < candle_data.close { candle_data.open } else { candle_data.close }, // box bottom
+                                            (candle_data.high + candle_data.low) / 2.0, // median
+                                            if candle_data.open > candle_data.close { candle_data.open } else { candle_data.close }, // box top 
+                                            candle_data.high       // highest price (top whisker)
+                                        )
+                                    )
+                                    .whisker_width(0.5)  // Width of the whiskers relative to the box
+                                    .box_width(0.7)      // Width of the box/body
+                                    // Color the candle based on whether price went up or down
+                                    .fill(if candle_data.close >= candle_data.open {
+                                        egui::Color32::from_rgb(0, 200, 0) // Brighter green for price up
+                                    } else {
+                                        egui::Color32::from_rgb(200, 0, 0)  // Brighter red for price down
+                                    })
+                                    .stroke(egui::Stroke::new(1.5, egui::Color32::WHITE)); // Add white outline
+                                    
+                                    candles.push(box_elem);
                                 }
                             }
                         }
                     }
                     
-                    // Only display chart if we have valid points
-                    if !plot_points.is_empty() {
-                        let line = Line::new(PlotPoints::from(plot_points))
-                            .width(2.0)
-                            .color(egui::Color32::from_rgb(0, 150, 200));
+                    // Only display chart if we have valid candles
+                    if !candles.is_empty() {
+                        println!("Created {} candles for chart", candles.len());
+                        
+                        // Create a named box plot with the candles
+                        let box_plot = BoxPlot::new("BTC/USD", candles);
+                        
+                        // Calculate the min and max y values for better scaling
+                        let mut min_price = f64::MAX;
+                        let mut max_price = f64::MIN;
+                        
+                        for (_, candle) in &self.price_history {
+                            min_price = min_price.min(candle.low);
+                            max_price = max_price.max(candle.high);
+                        }
+                        
+                        // Add some padding to the min/max for better visual appearance
+                        let price_range = max_price - min_price;
+                        let min_y = (min_price - (price_range * 0.05)).max(0.0); // 5% padding below, but not below 0
+                        let max_y = max_price + (price_range * 0.05); // 5% padding above
+                        
+                        // Create a custom formatter for the x-axis to show time
+                        let time_formatter = |_name: &str, value: &egui_plot::PlotPoint| -> String {
+                            // Try to convert the timestamp back to a readable format
+                            if let Some(dt) = Utc.timestamp_opt(value.x as i64, 0).single() {
+                                // Format as HH:MM
+                                format!("{:02}:{:02}", dt.hour(), dt.minute())
+                            } else {
+                                format!("{:.1}", value.x) // Fallback
+                            }
+                        };
                         
                         // Display the plot
                         Plot::new("btc_price_history")
-                            .view_aspect(3.0)
-                            .height(200.0)
-                            .show_axes([true, true])
-                            .label_formatter(
-                                |name, value| {
-                                    if name == "btc_price_history" {
-                                        format!("Time: {:.1} min, Price: ${:.2}", value.x, value.y)
-                                    } else {
-                                        format!("${:.2}", value.y)
-                                    }
-                                }
-                            )
+                            .view_aspect(2.5)  // Wider aspect ratio
+                            .height(250.0)     // Taller chart
+                            .allow_zoom(true)
+                            .allow_scroll(true)
+                            .allow_drag(true)
+                            .min_size(egui::vec2(400.0, 250.0)) // Set minimum chart size
+                            .include_y(0.0)    // Always include zero on y-axis
+                            .y_axis_min_width(2.0)   // Make y-axis more visible
+                            .y_axis_label("Price (USD)")
+                            .x_axis_label("Time (UTC)")
+                            .label_formatter(time_formatter)
+                            .legend(Legend::default().position(Corner::RightTop))
+                            // Set custom bounds for better scaling
+                            .include_y(min_y) // Include minimum y value
+                            .include_y(max_y) // Include maximum y value
                             .show(ui, |plot_ui| {
-                                plot_ui.line(line);
+                                // Add the candlestick chart
+                                plot_ui.box_plot(box_plot);
                             });
                     }
                     
@@ -211,7 +300,7 @@ impl eframe::App for BitcoinApp {
                     ui.label("Recent Price Updates:");
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                         for (time, price) in self.price_history.iter().rev().take(10) {
-                            ui.label(format!("{}: ${:.2}", time, price));
+                            ui.label(format!("{}: ${:.2}", time, price.close));
                         }
                     });
                 }
@@ -247,23 +336,34 @@ fn main() -> Result<(), eframe::Error> {
                 // Debug print point
                 println!("Processing point: timestamp={}, close={}", point.timestamp, point.close);
                 
-                if let (Ok(timestamp), Ok(price)) = (
+                if let (Ok(timestamp), Ok(open), Ok(high), Ok(low), Ok(close)) = (
                     point.timestamp.parse::<i64>(),
+                    point.open.parse::<f64>(),
+                    point.high.parse::<f64>(),
+                    point.low.parse::<f64>(),
                     point.close.parse::<f64>()
                 ) {
                     // Debug timestamp parsing
                     println!("  Parsed timestamp: {}", timestamp);
                     
+                    // Create candle data
+                    let candle = CandleData {
+                        open,
+                        high,
+                        low,
+                        close
+                    };
+                    
                     // Convert unix timestamp to ISO 8601
                     if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
                         let formatted_time = datetime.to_rfc3339();
                         println!("  Formatted time: {}", formatted_time);
-                        history.push((formatted_time, price));
+                        history.push((formatted_time, candle));
                     } else {
                         println!("  Invalid timestamp: {}", timestamp);
                     }
                 } else {
-                    println!("  Failed to parse timestamp or price");
+                    println!("  Failed to parse timestamp or price values");
                 }
             }
             
@@ -275,8 +375,8 @@ fn main() -> Result<(), eframe::Error> {
                 state.historical_data = history;
                 
                 // Set the current price from the latest historical data point
-                if let Some((_, latest_price)) = state.historical_data.last() {
-                    state.price = *latest_price;
+                if let Some((_, latest_candle)) = state.historical_data.last() {
+                    state.price = latest_candle.close;
                     state.last_updated = get_current_timestamp();
                 }
             }
@@ -415,7 +515,7 @@ fn main() -> Result<(), eframe::Error> {
                         .build()
                         .unwrap());
             }
-            Box::new(BitcoinApp::new(app_state))
+            Ok(Box::new(BitcoinApp::new(app_state)) as Box<dyn eframe::App>)
         }),
     )
 }
@@ -440,12 +540,14 @@ fn get_current_timestamp() -> String {
 
 // Helper function to refresh Bitcoin price
 fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
+    println!("Refreshing Bitcoin price and historical data...");
     // Mark as updating
     {
         let mut state = state.lock().unwrap();
         state.updating = true;
     }
     
+    // First fetch the current price
     match fetch_bitcoin_price() {
         Ok(price) => {
             println!("Updated BTC price: ${:.2}", price);
@@ -464,6 +566,44 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
             eprintln!("Failed to fetch BTC price: {}", e);
             let mut state = state.lock().unwrap();
             state.updating = false;
+            return; // Exit early if we couldn't fetch the current price
+        }
+    }
+    
+    // Then fetch historical data to update the chart
+    if let Ok(historical_data) = fetch_historical_bitcoin_prices() {
+        let mut history = Vec::new();
+        
+        // Convert historical data to our format
+        for point in historical_data.data.ohlc.iter() {
+            if let (Ok(timestamp), Ok(open), Ok(high), Ok(low), Ok(close)) = (
+                point.timestamp.parse::<i64>(),
+                point.open.parse::<f64>(),
+                point.high.parse::<f64>(),
+                point.low.parse::<f64>(),
+                point.close.parse::<f64>()
+            ) {
+                if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
+                    let formatted_time = datetime.to_rfc3339();
+                    
+                    // Create candle data structure
+                    let candle = CandleData {
+                        open,
+                        high,
+                        low,
+                        close
+                    };
+                    
+                    history.push((formatted_time, candle));
+                }
+            }
+        }
+        
+        // Update historical data in state
+        if !history.is_empty() {
+            let mut state = state.lock().unwrap();
+            state.historical_data = history;
+            state.new_price_fetched = true; // Force chart update
         }
     }
 }
