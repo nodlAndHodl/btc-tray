@@ -166,7 +166,9 @@ impl eframe::App for BitcoinApp {
             
             let state = self.state.lock().unwrap();
             let price_text = if state.price > 0.0 {
-                format!("${:.2}", state.price)
+                // Calculate satoshis per dollar (1 BTC = 100,000,000 satoshis)
+                let sats_per_dollar = 100_000_000.0 / state.price;
+                format!("${:.2} | {:.0} sats/$", state.price, sats_per_dollar)
             } else {
                 "Loading...".to_string()
             };
