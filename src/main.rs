@@ -50,6 +50,34 @@ fn print_historical_data(data: &BitstampHistoricalData) {
     }
 }
 
+// Chart timeframe options
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ChartTimeframe {
+    Hours24,   // 24 hour chart with hourly candles
+    Week,      // Week chart with daily candles
+    Month,     // Month chart with daily candles
+}
+
+impl ChartTimeframe {
+    // Get a human-readable description of the timeframe
+    fn description(&self) -> String {
+        match self {
+            ChartTimeframe::Hours24 => "24 Hours (hourly)".to_string(),
+            ChartTimeframe::Week => "1 Week (4-hour)".to_string(),
+            ChartTimeframe::Month => "1 Month (daily)".to_string(),
+        }
+    }
+    
+    // Get API parameters for this timeframe
+    fn api_params(&self) -> (u32, u32) {
+        match self {
+            ChartTimeframe::Hours24 => (3600, 24),     // step=3600 (hourly), limit=24 (24 hours)
+            ChartTimeframe::Week => (14400, 42),       // step=14400 (4-hourly), limit=42 (7 days)
+            ChartTimeframe::Month => (86400, 30),      // step=86400 (daily), limit=30 (month)
+        }
+    }
+}
+
 // Shared state between the tray icon and the egui app
 struct BitcoinState {
     price: f64,
@@ -59,6 +87,8 @@ struct BitcoinState {
     new_price_fetched: bool,
     // Store historical data as OHLC (Open, High, Low, Close)
     historical_data: Vec<(TimeInfo, CandleData)>,
+    // Current chart timeframe
+    chart_timeframe: ChartTimeframe,
 }
 
 // Structure to hold candlestick data
@@ -93,6 +123,7 @@ impl BitcoinState {
             updating: false,
             new_price_fetched: false,
             historical_data: Vec::new(),
+            chart_timeframe: ChartTimeframe::Hours24, // Default to 24 hours view
         }
     }
 }
@@ -190,7 +221,13 @@ impl eframe::App for BitcoinApp {
                 
                 // Center the chart and its label
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.label("Bitcoin Price History (24 hours):");
+                    // Get the appropriate chart title based on current timeframe
+                    let chart_title = match state.chart_timeframe {
+                        ChartTimeframe::Hours24 => "Bitcoin Price History (24 hours - hourly candles):",
+                        ChartTimeframe::Week => "Bitcoin Price History (1 week - 4-hour candles):",
+                        ChartTimeframe::Month => "Bitcoin Price History (1 month - daily candles):",
+                    };
+                    ui.label(chart_title);
                     ui.add_space(5.0);
                     
                     // Create plot data
@@ -317,7 +354,7 @@ fn main() -> Result<(), eframe::Error> {
     
     thread::spawn(move || {
         // First try to get historical data
-        if let Ok(historical_data) = fetch_historical_bitcoin_prices() {
+        if let Ok(historical_data) = fetch_historical_bitcoin_prices(ChartTimeframe::Hours24) {
             // Print debug info about the data
             print_historical_data(&historical_data);
             
@@ -409,14 +446,24 @@ fn main() -> Result<(), eframe::Error> {
             // Create menu items with unique identifiers
             // The third parameter is for keyboard shortcuts (Accelerator), not callbacks
             let refresh_i = MenuItem::with_id("refresh-btc", "Refresh BTC Price", true, None);
+                
+            // Add chart timeframe selection options
+            let timeframe_24h = MenuItem::with_id("timeframe-24h", "Chart: 24 Hours (hourly)", true, None);
+            let timeframe_week = MenuItem::with_id("timeframe-week", "Chart: 1 Week (4-hour)", true, None);
+            let timeframe_month = MenuItem::with_id("timeframe-month", "Chart: 1 Month (daily)", true, None);
+                
             let quit_i = MenuItem::with_id("quit-app", "Quit", true, None);
-            
+                
             // Create a clone of the state for the menu event handler thread
             let state_for_menu_events = linux_state.clone();
-            
+                
             // Add items to the menu
             let _ =tray_menu.append_items(&[
                 &refresh_i,
+                &PredefinedMenuItem::separator(),
+                &timeframe_24h,
+                &timeframe_week,
+                &timeframe_month,
                 &PredefinedMenuItem::separator(),
                 &quit_i,
             ]);
@@ -441,6 +488,33 @@ fn main() -> Result<(), eframe::Error> {
                     match id.as_str() {
                         "refresh-btc" => {
                             refresh_bitcoin_price(state_for_menu_events.clone());
+                        },
+                        "timeframe-24h" => {
+                            let mut state = state_for_menu_events.lock().unwrap();
+                            if state.chart_timeframe != ChartTimeframe::Hours24 {
+                                state.chart_timeframe = ChartTimeframe::Hours24;
+                                // Drop lock before refreshing
+                                drop(state);
+                                refresh_bitcoin_price(state_for_menu_events.clone());
+                            }
+                        },
+                        "timeframe-week" => {
+                            let mut state = state_for_menu_events.lock().unwrap();
+                            if state.chart_timeframe != ChartTimeframe::Week {
+                                state.chart_timeframe = ChartTimeframe::Week;
+                                // Drop lock before refreshing
+                                drop(state);
+                                refresh_bitcoin_price(state_for_menu_events.clone());
+                            }
+                        },
+                        "timeframe-month" => {
+                            let mut state = state_for_menu_events.lock().unwrap();
+                            if state.chart_timeframe != ChartTimeframe::Month {
+                                state.chart_timeframe = ChartTimeframe::Month;
+                                // Drop lock before refreshing
+                                drop(state);
+                                refresh_bitcoin_price(state_for_menu_events.clone());
+                            }
                         },
                         "quit-app" => {
                             std::process::exit(0);
@@ -559,7 +633,14 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
     }
     
     // Then fetch historical data to update the chart
-    if let Ok(historical_data) = fetch_historical_bitcoin_prices() {
+    let timeframe;
+    {
+        // Temporarily lock state to get current timeframe
+        let locked_state = state.lock().unwrap();
+        timeframe = locked_state.chart_timeframe;
+    }
+    
+    if let Ok(historical_data) = fetch_historical_bitcoin_prices(timeframe) {
         let mut history = Vec::new();
         
         // Convert historical data to our format
@@ -627,20 +708,21 @@ fn format_unix_timestamp(unix_timestamp_str: &str) -> String {
     }
 }
 
-fn fetch_historical_bitcoin_prices() -> Result<BitstampHistoricalData> {
-    // Use Bitstamp API to get hourly BTC/USD historical data for the last 24 hours
-    // step=3600 means hourly data (3600 seconds = 1 hour)
-    // limit=24 means last 24 hours
-    let url = "https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=3600&limit=24";
-    println!("Fetching historical data from: {}", url);
+fn fetch_historical_bitcoin_prices(timeframe: ChartTimeframe) -> Result<BitstampHistoricalData> {
+    // Get the step (candle interval in seconds) and limit (number of candles) based on timeframe
+    let (step, limit) = timeframe.api_params();
     
-    let response_text = reqwest::blocking::get(url)?.text()?;
+    // Construct the URL with the appropriate parameters
+    let url = format!("https://www.bitstamp.net/api/v2/ohlc/btcusd/?step={}&limit={}", step, limit);
+    println!("Fetching historical data from: {} ({})", url, timeframe.description());
+    
+    let response_text = reqwest::blocking::get(&url)?.text()?;
     println!("Response text sample: {}", &response_text[..std::cmp::min(200, response_text.len())]);
     
     // Try to parse the JSON
     match serde_json::from_str::<BitstampHistoricalData>(&response_text) {
         Ok(data) => {
-            println!("Successfully parsed historical data");
+            println!("Successfully parsed historical data for {}", timeframe.description());
             // Print a sample of formatted timestamps
             if !data.data.ohlc.is_empty() {
                 let sample_timestamp = &data.data.ohlc[0].timestamp;
