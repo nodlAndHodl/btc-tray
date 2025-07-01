@@ -6,10 +6,10 @@ use std::thread;
 use anyhow::Result;
 use serde::Deserialize;
 use egui_plot::{Plot, BoxPlot, BoxElem, BoxSpread, Corner, Legend};
-use chrono::{DateTime, Utc, TimeZone, Timelike};
+use chrono::{DateTime, Utc, TimeZone, Timelike, Local};
 
 use tray_icon::{
-    menu::{AboutMetadata, MenuItem, PredefinedMenuItem},
+    menu::{MenuItem, PredefinedMenuItem},
     TrayIconBuilder,
 };
 
@@ -162,7 +162,9 @@ impl eframe::App for BitcoinApp {
         self.update_price_history();
         
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Bitcoin Metrics");
+            ui.horizontal(|ui| {
+                //ui.heading("Bitcoin Metrics");
+            });
             
             let state = self.state.lock().unwrap();
             let price_text = if state.price > 0.0 {
@@ -174,127 +176,127 @@ impl eframe::App for BitcoinApp {
             };
             
             ui.add_space(20.0);
-            ui.heading(price_text);
-            ui.add_space(5.0);
-            ui.label(format!("Last updated: {}", state.last_updated));
+            // Center the price and last updated information
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.heading(price_text);
+                ui.add_space(5.0);
+                ui.label(format!("Last updated: {}", state.last_updated));
+            });
             
             ui.add_space(10.0);
-            if ui.button("Refresh Price").clicked() {
-                // We'll handle the actual refresh from outside the egui app
-                drop(state); // Release the mutex before the thread operation
-                let state_clone = self.state.clone();
-                thread::spawn(move || {
-                    refresh_bitcoin_price(state_clone);
-                });
-            }
-            
-            ui.add_space(20.0);
             
             if !self.price_history.is_empty() {
                 ui.add_space(10.0);
-                ui.label("Bitcoin Price History (24 hours):");
-                ui.add_space(5.0);
                 
-                // Create plot data
-                if !self.price_history.is_empty() {
-                    // Create candlestick elements for the chart
-                    let mut candles = Vec::with_capacity(self.price_history.len());
+                // Center the chart and its label
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    ui.label("Bitcoin Price History (24 hours):");
+                    ui.add_space(5.0);
                     
-                    // Calculate x-axis values (time elapsed in minutes from first data point)
-                    if let Some((first_time_info, _)) = self.price_history.first() {
-                        if let Ok(first_time) = DateTime::parse_from_rfc3339(&first_time_info.rfc3339) {
-                            for (time_info, candle_data) in self.price_history.iter() {
-                                if let Ok(timestamp) = DateTime::parse_from_rfc3339(&time_info.rfc3339) {
-                                   // Use timestamp directly (as seconds since epoch) for x-axis position
-                                    // Convert i64 timestamp to f64 for plotting
-                                    let plot_x = time_info.raw_timestamp as f64;
-                                    
-                                    // For proper candlestick chart, the x-position is time and y values are price
-                                    let box_elem = BoxElem::new(
-                                        plot_x,  // x position (timestamp as f64)
-                                        BoxSpread::new(
-                                            candle_data.low,       // lowest price (bottom whisker)
-                                            candle_data.open,      // box bottom - ALWAYS the open price
-                                            (candle_data.open + candle_data.close) / 2.0, // median - midpoint between open and close
-                                            candle_data.close,     // box top - ALWAYS the close price
-                                            candle_data.high       // highest price (top whisker)
+                    // Create plot data
+                    if !self.price_history.is_empty() {
+                        // Create candlestick elements for the chart
+                        let mut candles = Vec::with_capacity(self.price_history.len());
+                        
+                        // Calculate x-axis values (time elapsed in minutes from first data point)
+                        if let Some((first_time_info, _)) = self.price_history.first() {
+                            if let Ok(_first_time) = DateTime::parse_from_rfc3339(&first_time_info.rfc3339) {
+                                for (time_info, candle_data) in self.price_history.iter() {
+                                    if let Ok(_timestamp) = DateTime::parse_from_rfc3339(&time_info.rfc3339) {
+                                       // Use timestamp directly (as seconds since epoch) for x-axis position
+                                        // Convert i64 timestamp to f64 for plotting
+                                        let plot_x = time_info.raw_timestamp as f64;
+                                        
+                                        // For proper candlestick chart, the x-position is time and y values are price
+                                        let box_elem = BoxElem::new(
+                                            plot_x,  // x position (timestamp as f64)
+                                            BoxSpread::new(
+                                                candle_data.low,       // lowest price (bottom whisker)
+                                                candle_data.open,      // box bottom - ALWAYS the open price
+                                                (candle_data.open + candle_data.close) / 2.0, // median - midpoint between open and close
+                                                candle_data.close,     // box top - ALWAYS the close price
+                                                candle_data.high       // highest price (top whisker)
+                                            )
                                         )
-                                    )
-                                    .whisker_width(0.8)  // Width of the whiskers relative to the box
-                                    .box_width(2.2)      // Width of the box/body
-                                    // Color the candle based on whether price went up or down
-                                    .fill(if candle_data.close >= candle_data.open {
-                                        egui::Color32::from_rgb(0, 200, 0) // Brighter green for price up
-                                    } else {
-                                        egui::Color32::from_rgb(200, 0, 0)  // Brighter red for price down
-                                    })
-                                    .stroke(if candle_data.close >= candle_data.open {
-                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 0)) // Green stroke for price up
-                                    } else {
-                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 0, 0)) // Red stroke for price down
-                                    }); // Outline color matches fill color
-                                    
-                                    candles.push(box_elem);
+                                        .whisker_width(0.8)  // Width of the whiskers relative to the box
+                                        .box_width(2.2)      // Width of the box/body
+                                        // Color the candle based on whether price went up or down
+                                        .fill(if candle_data.close >= candle_data.open {
+                                            egui::Color32::from_rgb(0, 200, 0) // Brighter green for price up
+                                        } else {
+                                            egui::Color32::from_rgb(200, 0, 0)  // Brighter red for price down
+                                        })
+                                        .stroke(if candle_data.close >= candle_data.open {
+                                            egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 255, 0)) // Green stroke for price up
+                                        } else {
+                                            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 0, 0)) // Red stroke for price down
+                                        }); // Outline color matches fill color
+                                        
+                                        candles.push(box_elem);
+                                    }
                                 }
                             }
                         }
-                    }
-                    
-                    // Only display chart if we have valid candles
-                    if !candles.is_empty() {
-                        //println!("Created {} candles for chart", candles.len());
                         
-                        // Create a named box plot with the candles
-                        let box_plot = BoxPlot::new("BTC/USD", candles);
-                        
-                        // Calculate the min and max y values for better scaling
-                        let mut min_price = f64::MAX;
-                        let mut max_price = f64::MIN;
-                        
-                        for (_, candle) in &self.price_history {
-                            min_price = min_price.min(candle.low);
-                            max_price = max_price.max(candle.high);
-                        }
-                        
-                        // Add some padding to the min/max for better visual appearance
-                        let price_range = max_price - min_price;
-                        let min_y = (min_price - (price_range * 0.05)).max(0.0); // 5% padding below, but not below 0
-                        let max_y = max_price + (price_range * 0.05); // 5% padding above
-                        
-                        // Create a custom formatter for the x-axis to show time
-                        let time_formatter = |_name: &str, value: &egui_plot::PlotPoint| -> String {
-                            // Try to convert the timestamp back to a readable format
-                            if let Some(dt) = Utc.timestamp_opt(value.x as i64, 0).single() {
-                                // Format as HH:MM
-                                format!("{:02}:{:02}", dt.hour(), dt.minute())
-                            } else {
-                                format!("{:.1}", value.x) // Fallback
+                        // Only display chart if we have valid candles
+                        if !candles.is_empty() {
+                            //println!("Created {} candles for chart", candles.len());
+                            
+                            // Create a named box plot with the candles
+                            let box_plot = BoxPlot::new("BTC/USD", candles);
+                            
+                            // Calculate the min and max y values for better scaling
+                            let mut min_price = f64::MAX;
+                            let mut max_price = f64::MIN;
+                            
+                            for (_, candle) in &self.price_history {
+                                min_price = min_price.min(candle.low);
+                                max_price = max_price.max(candle.high);
                             }
-                        };
-                        
-                        // Display the plot
-                        Plot::new("btc_price_history")
-                            .view_aspect(2.5)  // Wider aspect ratio
-                            .height(250.0)     // Taller chart
-                            .allow_zoom(true)
-                            .allow_scroll(true)
-                            .allow_drag(true)
-                            .min_size(egui::vec2(400.0, 250.0)) // Set minimum chart size
-                            // .include_y(0.0)    // Always include zero on y-axis
-                            .y_axis_min_width(0.5)   // Make y-axis more visible
-                            .y_axis_label("Price (USD)")
-                            .x_axis_label("Time (UTC)")
-                            .label_formatter(time_formatter)
-                            .legend(Legend::default().position(Corner::RightTop))
-                            // Set custom bounds for better scaling
-                            .include_y(min_y) // Include minimum y value
-                            .include_y(max_y) // Include maximum y value
-                            .show(ui, |plot_ui| {
-                                // Add the candlestick chart
-                                plot_ui.box_plot(box_plot);
-                            });
+                            
+                            // Add some padding to the min/max for better visual appearance
+                            let price_range = max_price - min_price;
+                            let min_y = (min_price - (price_range * 0.05)).max(0.0); // 5% padding below, but not below 0
+                            let max_y = max_price + (price_range * 0.05); // 5% padding above
+                            
+                            // Create a custom formatter for the x-axis to show time
+                            let time_formatter = |_name: &str, value: &egui_plot::PlotPoint| -> String {
+                                // Try to convert the timestamp back to a readable format
+                                if let Some(utc_dt) = Utc.timestamp_opt(value.x as i64, 0).single() {
+                                    // Convert UTC to local time
+                                    let local_time = Local.from_utc_datetime(&utc_dt.naive_utc());
+                                    // Format as HH:MM in local time
+                                    format!("{:02}  {:02}:{:02}", local_time.date_naive(), local_time.hour(), local_time.minute())
+                                } else {
+                                    format!("{:.1}", value.x) // Fallback
+                                }
+                            };
+                            
+                            // Display the plot
+                            Plot::new("btc_price_history")
+                                .view_aspect(2.5)  // Wider aspect ratio
+                                .height(200.0)     // Taller chart
+                                .width(500.0)      // Wider chart
+                                .allow_zoom(true)
+                                .allow_scroll(true)
+                                .allow_drag(true)
+                                .min_size(egui::vec2(500.0, 200.0)) // Set minimum chart size
+                                // .include_y(0.0)    // Always include zero on y-axis
+                                .y_axis_min_width(0.5)   // Make y-axis more visible
+                                .y_axis_label("Price ($)")
+                                .x_axis_label("Time (Local)")
+                                .label_formatter(time_formatter)
+                                .legend(Legend::default().position(Corner::RightTop))
+                                // Set custom bounds for better scaling
+                                .include_y(min_y) // Include minimum y value
+                                .include_y(max_y) // Include maximum y value
+                                .show(ui, |plot_ui| {
+                                    // Add the candlestick chart
+                                    plot_ui.box_plot(box_plot);
+                                });
+                        }
                     }
-                }
+                });
             }
         });
         
@@ -407,7 +409,6 @@ fn main() -> Result<(), eframe::Error> {
             // Create menu items with unique identifiers
             // The third parameter is for keyboard shortcuts (Accelerator), not callbacks
             let refresh_i = MenuItem::with_id("refresh-btc", "Refresh BTC Price", true, None);
-            let show_i = MenuItem::new("Show Window", true, None);
             let quit_i = MenuItem::with_id("quit-app", "Quit", true, None);
             
             // Create a clone of the state for the menu event handler thread
@@ -415,16 +416,7 @@ fn main() -> Result<(), eframe::Error> {
             
             // Add items to the menu
             let _ =tray_menu.append_items(&[
-                &PredefinedMenuItem::about(
-                    None,
-                    Some(AboutMetadata {
-                        name: Some("BTC Ticker".to_string()),
-                        copyright: Some("Copyright BTC Ticker".to_string()),
-                        ..Default::default()
-                    }),
-                ),
                 &refresh_i,
-                &show_i,
                 &PredefinedMenuItem::separator(),
                 &quit_i,
             ]);
