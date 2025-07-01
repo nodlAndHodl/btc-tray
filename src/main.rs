@@ -330,6 +330,29 @@ impl eframe::App for BitcoinApp {
                                 .show(ui, |plot_ui| {
                                     // Add the candlestick chart
                                     plot_ui.box_plot(box_plot);
+                                    
+                                    // Add an orange horizontal line at the current Bitcoin price
+                                    if state.price > 0.0 {
+                                        let orange_line_color = egui::Color32::from_rgb(255, 140, 0); // Orange color
+                                        let line_stroke = egui::Stroke::new(2.0, orange_line_color); // Thicker line for visibility
+                                        
+                                        // Create a horizontal line across the entire plot at the current price
+                                        // Get the first and last timestamps from our data for the line endpoints
+                                        if let (Some((first_time, _)), Some((last_time, _))) = (self.price_history.first(), self.price_history.last()) {
+                                            let start_x = first_time.raw_timestamp as f64;
+                                            let end_x = last_time.raw_timestamp as f64;
+                                            
+                                            // Add the horizontal line using a line with two points
+                                            let points: Vec<[f64; 2]> = vec![
+                                                [start_x, state.price],
+                                                [end_x, state.price],
+                                            ];
+                                            let line = egui_plot::Line::new(format!("Current Price: ${:.2}", state.price), points)
+                                            .stroke(line_stroke);
+                                            
+                                            plot_ui.line(line);
+                                        }
+                                    }
                                 });
                         }
                     }
