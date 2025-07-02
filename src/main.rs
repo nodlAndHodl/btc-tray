@@ -309,15 +309,21 @@ impl eframe::App for BitcoinApp {
                                 }
                             };
                             
-                            // Display the plot
+                            // Get available width from UI
+                            let available_width = ui.available_width();
+                            
+                            // Calculate height based on width (maintain aspect ratio)
+                            let chart_height = (available_width / 2.5).min(300.0).max(150.0);
+                            
+                            // Display the plot using available width
                             Plot::new("btc_price_history")
                                 .view_aspect(2.5)  // Wider aspect ratio
-                                .height(200.0)     // Taller chart
-                                .width(500.0)      // Wider chart
+                                .height(chart_height)     // Dynamic height based on width
+                                .width(available_width.min(1200.0))      // Use available width with maximum cap
                                 .allow_zoom(true)
                                 .allow_scroll(true)
                                 .allow_drag(true)
-                                .min_size(egui::vec2(500.0, 200.0)) // Set minimum chart size
+                                .min_size(egui::vec2(300.0, 150.0)) // Set reasonable minimum size
                                 // .include_y(0.0)    // Always include zero on y-axis
                                 .y_axis_min_width(0.5)   // Make y-axis more visible
                                 .y_axis_label("Price ($)")
