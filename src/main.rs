@@ -638,8 +638,11 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
         state.updating = true;
     }
     
+    // Create a reusable API client
+    let client = BitstampClient::new();
+    
     // First fetch the current price
-    match fetch_bitcoin_price() {
+    match client.fetch_current_price() {
         Ok(price) => {
             println!("Updated BTC price: ${:.2}", price);
             let mut state = state.lock().unwrap();
@@ -657,6 +660,16 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
             eprintln!("Failed to fetch BTC price: {}", e);
             let mut state = state.lock().unwrap();
             state.updating = false;
+            
+            // If we have historical data, we can use the latest price as a fallback
+            if !state.historical_data.is_empty() {
+                if let Some((_, latest_candle)) = state.historical_data.last() {
+                    println!("Using last historical price as fallback: ${:.2}", latest_candle.close);
+                    state.price = latest_candle.close;
+                    state.last_updated = format!("{}* (fallback)", get_current_timestamp());
+                }
+            }
+            
             return; // Exit early if we couldn't fetch the current price
         }
     }
@@ -669,57 +682,141 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
         timeframe = locked_state.chart_timeframe;
     }
     
-    if let Ok(historical_data) = fetch_historical_bitcoin_prices(timeframe) {
-        let mut history = Vec::new();
-        
-        // Convert historical data to our format
-        for point in historical_data.data.ohlc.iter() {
-            if let (Ok(timestamp), Ok(open), Ok(high), Ok(low), Ok(close)) = (
-                point.timestamp.parse::<i64>(),
-                point.open.parse::<f64>(),
-                point.high.parse::<f64>(),
-                point.low.parse::<f64>(),
-                point.close.parse::<f64>()
-            ) {
-                if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
-                    // Create candle data structure
-                    let candle = CandleData {
-                        open,
-                        high,
-                        low,
-                        close
-                    };
-                    
-                    // Also log the human-readable time for debugging
-                    let human_time: String = format_unix_timestamp(&point.timestamp);
-                    
-                    history.push((TimeInfo {
-                        raw_timestamp: timestamp,
-                        formatted_time: human_time,
-                        rfc3339: datetime.to_rfc3339(),
-                    }, candle));
+    match client.fetch_historical_prices(timeframe) {
+        Ok(historical_data) => {
+            let mut history = Vec::new();
+            
+            // Convert historical data to our format
+            for point in historical_data.data.ohlc.iter() {
+                if let (Ok(timestamp), Ok(open), Ok(high), Ok(low), Ok(close)) = (
+                    point.timestamp.parse::<i64>(),
+                    point.open.parse::<f64>(),
+                    point.high.parse::<f64>(),
+                    point.low.parse::<f64>(),
+                    point.close.parse::<f64>()
+                ) {
+                    if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
+                        // Create candle data structure
+                        let candle = CandleData {
+                            open,
+                            high,
+                            low,
+                            close
+                        };
+                        
+                        // Create human-readable time for debugging
+                        let human_time: String = format_unix_timestamp(&point.timestamp);
+                        
+                        history.push((TimeInfo {
+                            raw_timestamp: timestamp,
+                            formatted_time: human_time,
+                            rfc3339: datetime.to_rfc3339(),
+                        }, candle));
+                    }
                 }
             }
-        }
-        
-        // Update historical data in state
-        if !history.is_empty() {
-            let mut state = state.lock().unwrap();
-            state.historical_data = history;
-            state.new_price_fetched = true; // Force chart update
+            
+            // Update historical data in state
+            if !history.is_empty() {
+                let mut state = state.lock().unwrap();
+                state.historical_data = history;
+                state.new_price_fetched = true; // Force chart update
+            }
+        },
+        Err(e) => {
+            eprintln!("Failed to fetch historical data: {}", e);
         }
     }
 }
 
-fn fetch_bitcoin_price() -> Result<f64> {
-    // Use Bitstamp API to get BTC/USD ticker
-    let url = "https://www.bitstamp.net/api/v2/ticker/btcusd/";
-    let response = reqwest::blocking::get(url)?
-        .json::<BitstampResponse>()?;
+// Bitstamp API client for handling all API interactions
+struct BitstampClient {
+    client: reqwest::blocking::Client,
+    base_url: String,
+}
+
+impl BitstampClient {
+    fn new() -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10)) // 10 second timeout
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+            
+        BitstampClient {
+            client,
+            base_url: "https://www.bitstamp.net/api/v2".to_string(),
+        }
+    }
+    
+    fn fetch_current_price(&self) -> Result<f64> {
+        let url = format!("{}/ticker/btcusd/", self.base_url);
         
-    // Convert the price string to a float
-    let price = response.last.parse::<f64>()?;
-    Ok(price)
+        println!("Fetching current BTC price from: {}", url);
+        
+        let response = self.client.get(&url)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to fetch price: {}", e))?;
+            
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("API returned error status: {}", response.status()));
+        }
+        
+        let ticker: BitstampResponse = response.json()
+            .map_err(|e| anyhow::anyhow!("Failed to parse price response: {}", e))?;
+            
+        // Convert the price string to a float
+        let price = ticker.last.parse::<f64>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse price value: {}", e))?;
+            
+        Ok(price)
+    }
+    
+    fn fetch_historical_prices(&self, timeframe: ChartTimeframe) -> Result<BitstampHistoricalData> {
+        // Get the step (candle interval in seconds) and limit (number of candles) based on timeframe
+        let (step, limit) = timeframe.api_params();
+        
+        // Construct the URL with the appropriate parameters
+        let url = format!("{}/ohlc/btcusd/?step={}&limit={}", self.base_url, step, limit);
+        println!("Fetching historical data from: {} ({})", url, timeframe.description());
+        
+        let response = self.client.get(&url)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to fetch historical data: {}", e))?;
+            
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Historical API returned error status: {}", response.status()));
+        }
+        
+        let response_text = response.text()
+            .map_err(|e| anyhow::anyhow!("Failed to get response text: {}", e))?;
+            
+        if response_text.len() > 200 {
+            println!("Response text sample: {}...", &response_text[..200]);
+        } else {
+            println!("Response text: {}", response_text);
+        }
+        
+        // Try to parse the JSON
+        let data = serde_json::from_str::<BitstampHistoricalData>(&response_text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse historical data: {}", e))?;
+            
+        println!("Successfully parsed historical data for {} ({} candles)", 
+                timeframe.description(), data.data.ohlc.len());
+                
+        // Print a sample of formatted timestamps if available
+        if !data.data.ohlc.is_empty() {
+            let sample_timestamp = &data.data.ohlc[0].timestamp;
+            let formatted = format_unix_timestamp(sample_timestamp);
+            println!("Sample timestamp: {} formatted as: {}", sample_timestamp, formatted);
+        }
+        
+        Ok(data)
+    }
+}
+
+// Wrapper function for backward compatibility
+fn fetch_bitcoin_price() -> Result<f64> {
+    BitstampClient::new().fetch_current_price()
 }
 
 // Helper function to format Unix timestamp to date-time format (YYYY-MM-DD HH:MM)
@@ -737,32 +834,7 @@ fn format_unix_timestamp(unix_timestamp_str: &str) -> String {
     }
 }
 
+// Wrapper function for backward compatibility
 fn fetch_historical_bitcoin_prices(timeframe: ChartTimeframe) -> Result<BitstampHistoricalData> {
-    // Get the step (candle interval in seconds) and limit (number of candles) based on timeframe
-    let (step, limit) = timeframe.api_params();
-    
-    // Construct the URL with the appropriate parameters
-    let url = format!("https://www.bitstamp.net/api/v2/ohlc/btcusd/?step={}&limit={}", step, limit);
-    println!("Fetching historical data from: {} ({})", url, timeframe.description());
-    
-    let response_text = reqwest::blocking::get(&url)?.text()?;
-    println!("Response text sample: {}", &response_text[..std::cmp::min(200, response_text.len())]);
-    
-    // Try to parse the JSON
-    match serde_json::from_str::<BitstampHistoricalData>(&response_text) {
-        Ok(data) => {
-            println!("Successfully parsed historical data for {}", timeframe.description());
-            // Print a sample of formatted timestamps
-            if !data.data.ohlc.is_empty() {
-                let sample_timestamp = &data.data.ohlc[0].timestamp;
-                let formatted = format_unix_timestamp(sample_timestamp);
-                println!("Sample timestamp: {} formatted as: {}", sample_timestamp, formatted);
-            }
-            Ok(data)
-        },
-        Err(e) => {
-            eprintln!("Error parsing historical data: {}", e);
-            Err(anyhow::anyhow!("Failed to parse historical data: {}", e))
-        }
-    }
+    BitstampClient::new().fetch_historical_prices(timeframe)
 }
