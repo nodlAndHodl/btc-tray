@@ -6,11 +6,6 @@ use chrono::{Utc, TimeZone, DateTime, Local};
 #[derive(Debug, Deserialize)]
 pub struct BitstampResponse {
     pub last: String,
-    pub timestamp: String,
-    pub volume: String,
-    pub open: String,
-    pub high: String,
-    pub low: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,12 +15,10 @@ pub struct BitstampOHLC {
     pub high: String,
     pub low: String,
     pub close: String,
-    pub volume: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct BitstampOHLCData {
-    pub pair: String,
     pub ohlc: Vec<BitstampOHLC>,
 }
 
@@ -34,7 +27,6 @@ pub struct BitstampHistoricalData {
     pub data: BitstampOHLCData,
 }
 
-// Chart timeframe options
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ChartTimeframe {
     Hours24,

@@ -4,7 +4,6 @@ use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use anyhow::Result;
-use serde::Deserialize;
 use egui_plot::{Plot, BoxPlot, BoxElem, BoxSpread, Corner, Legend};
 use chrono::{DateTime, Utc, TimeZone, Timelike, Local};
 
@@ -15,46 +14,15 @@ use tray_icon::{
 
 use eframe::egui;
 
-// Import the BitstampClient from our module
 mod bitstamp_client;
 use bitstamp_client::{BitstampClient, ChartTimeframe};
 
-// We'll use our own OhlcDataPoint type for local processing
-#[derive(Debug, Clone)]
-struct OhlcDataPoint {
-    timestamp: String,   // Unix timestamp
-    open: f64,          // Opening price
-    high: f64,          // Highest price
-    low: f64,           // Lowest price
-    close: f64,         // Closing price
-}
-
-// Local helper to convert from BitstampOHLC to our OhlcDataPoint
-fn convert_ohlc_point(point: &bitstamp_client::BitstampOHLC) -> Option<OhlcDataPoint> {
-    let open = point.open.parse::<f64>().ok()?;
-    let high = point.high.parse::<f64>().ok()?;
-    let low = point.low.parse::<f64>().ok()?;
-    let close = point.close.parse::<f64>().ok()?;
-    
-    Some(OhlcDataPoint {
-        timestamp: point.timestamp.clone(),
-        open,
-        high,
-        low,
-        close
-    })
-}
-
 // For debugging
 fn print_historical_data(data: &bitstamp_client::BitstampHistoricalData) {
-    println!("Historical data points: {}", data.data.ohlc.len());
-    println!("Pair: {}", data.data.pair);
     for (i, point) in data.data.ohlc.iter().enumerate().take(5) {
         println!("Point {}: timestamp={}, close={}", i, point.timestamp, point.close);
     }
 }
-
-// Note: We're now using ChartTimeframe from bitstamp_client module
 
 // Shared state between the tray icon and the egui app
 struct BitcoinState {
@@ -81,12 +49,10 @@ struct CandleData {
 // Structure to hold formatted timestamp info
 #[derive(Debug, Clone)]
 struct TimeInfo {
-    raw_timestamp: i64,      // Raw Unix timestamp
-    formatted_time: String,  // Human-readable formatted time
-    rfc3339: String,         // RFC3339 format for internal use
+    raw_timestamp: i64,     
+    formatted_time: String, 
+    rfc3339: String,        
 }
-
-// Implement Display trait for TimeInfo to use in format strings
 impl std::fmt::Display for TimeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.formatted_time)
@@ -101,12 +67,10 @@ impl BitcoinState {
             updating: false,
             new_price_fetched: false,
             historical_data: Vec::new(),
-            chart_timeframe: ChartTimeframe::Hours24, // Default to 24 hours view
+            chart_timeframe: ChartTimeframe::Hours24, 
         }
     }
 }
-
-// The egui application
 struct BitcoinApp {
     state: Arc<Mutex<BitcoinState>>,
     price_history: Vec<(TimeInfo, CandleData)>,
@@ -121,22 +85,15 @@ impl BitcoinApp {
     }
 
     fn update_price_history(&mut self) {
-        let mut state = self.state.lock().unwrap();
-        
+        let mut state = self.state.lock().unwrap();  
         // First check if we need to load initial historical data
         if self.price_history.is_empty() && !state.historical_data.is_empty() {
-            //println!("Loading {} historical data points into chart", state.historical_data.len());
-            // Initialize with historical data
             self.price_history = state.historical_data.clone();
         } else if !state.historical_data.is_empty() {
-            //println!("Updating with {} historical data points", state.historical_data.len());
-            // Update with newest historical data
             self.price_history = state.historical_data.clone();
         }
         
-        // Then check for new price updates
         if state.new_price_fetched {
-            // Create candle data from current price (open = high = low = close for current price)
             let candle = CandleData {
                 open: state.price,
                 high: state.price,
@@ -144,12 +101,11 @@ impl BitcoinApp {
                 close: state.price,
             };
             
-            // Add to history with proper TimeInfo struct
             let now = chrono::Utc::now();
             let timestamp = now.timestamp();
             let time_info = TimeInfo {
                 raw_timestamp: timestamp,
-                formatted_time: state.last_updated.clone(), // Use the existing formatted time
+                formatted_time: state.last_updated.clone(),
                 rfc3339: now.to_rfc3339(),
             };
             self.price_history.push((time_info, candle));
@@ -171,9 +127,6 @@ impl eframe::App for BitcoinApp {
         self.update_price_history();
         
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                //ui.heading("Bitcoin Metrics");
-            });
             
             let state = self.state.lock().unwrap();
             let price_text = if state.price > 0.0 {
@@ -201,9 +154,9 @@ impl eframe::App for BitcoinApp {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     // Get the appropriate chart title based on current timeframe
                     let chart_title = match state.chart_timeframe {
-                        ChartTimeframe::Hours24 => "Bitcoin Price History (24 hours - hourly candles):",
-                        ChartTimeframe::Week => "Bitcoin Price History (1 week - 4-hour candles):",
-                        ChartTimeframe::Month => "Bitcoin Price History (1 month - daily candles):",
+                        ChartTimeframe::Hours24 => "BTC Price (24 hours - hourly):",
+                        ChartTimeframe::Week => "BTC Price (1 week - 4-hour):",
+                        ChartTimeframe::Month => "BTC Price (1 month - daily):",
                     };
                     ui.label(chart_title);
                     ui.add_space(5.0);
@@ -455,9 +408,9 @@ fn main() -> Result<(), eframe::Error> {
             let refresh_i = MenuItem::with_id("refresh-btc", "Refresh BTC Price", true, None);
                 
             // Add chart timeframe selection options
-            let timeframe_24h = MenuItem::with_id("timeframe-24h", "Chart: 24 Hours (hourly)", true, None);
-            let timeframe_week = MenuItem::with_id("timeframe-week", "Chart: 1 Week (4-hour)", true, None);
-            let timeframe_month = MenuItem::with_id("timeframe-month", "Chart: 1 Month (daily)", true, None);
+            let timeframe_24h = MenuItem::with_id("timeframe-24h", "24 Hours (hourly)", true, None);
+            let timeframe_week = MenuItem::with_id("timeframe-week", "1 Week (4-hour)", true, None);
+            let timeframe_month = MenuItem::with_id("timeframe-month", "1 Month (daily)", true, None);
                 
             let quit_i = MenuItem::with_id("quit-app", "Quit", true, None);
                 
@@ -660,7 +613,7 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
         timeframe = locked_state.chart_timeframe;
     }
     
-    match client.fetch_historical_prices(timeframe) {
+    match BitstampClient::new().fetch_historical_prices(timeframe) {
         Ok(historical_data) => {
             let mut history = Vec::new();
             
@@ -700,13 +653,6 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
             eprintln!("Failed to fetch historical data: {}", e);
         }
     }
-}
-
-// We are now using the BitstampClient from bitstamp_client.rs
-
-// Wrapper function for backward compatibility
-fn fetch_bitcoin_price() -> Result<f64> {
-    BitstampClient::new().fetch_current_price()
 }
 
 // Helper function to format Unix timestamp to date-time format (YYYY-MM-DD HH:MM)
