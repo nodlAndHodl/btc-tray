@@ -35,6 +35,8 @@ struct BitcoinState {
     historical_data: Vec<(TimeInfo, CandleData)>,
     // Current chart timeframe
     chart_timeframe: ChartTimeframe,
+    // Flag to indicate when timeframe has been changed
+    timeframe_changed: bool,
 }
 
 // Structure to hold candlestick data
@@ -67,7 +69,8 @@ impl BitcoinState {
             updating: false,
             new_price_fetched: false,
             historical_data: Vec::new(),
-            chart_timeframe: ChartTimeframe::Hours24, 
+            chart_timeframe: ChartTimeframe::Hours24,
+            timeframe_changed: false,
         }
     }
 }
@@ -126,6 +129,12 @@ impl eframe::App for BitcoinApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_price_history();
         
+        // Check if we need to reset the view before entering the UI closure
+        let needs_reset = {
+            let state = self.state.lock().unwrap();
+            state.timeframe_changed
+        };
+        
         egui::CentralPanel::default().show(ctx, |ui| {
             
             let state = self.state.lock().unwrap();
@@ -157,6 +166,7 @@ impl eframe::App for BitcoinApp {
                         ChartTimeframe::Hours24 => "BTC Price (24 hours - hourly):",
                         ChartTimeframe::Week => "BTC Price (1 week - 4-hour):",
                         ChartTimeframe::Month => "BTC Price (1 month - daily):",
+                        ChartTimeframe::Year => "BTC Price (1 year - daily):",
                     };
                     ui.label(chart_title);
                     ui.add_space(5.0);
@@ -247,7 +257,8 @@ impl eframe::App for BitcoinApp {
                             let chart_height = (available_width / 2.5).min(300.0).max(150.0);
                             
                             // Display the plot using available width
-                            Plot::new("btc_price_history")
+                            // Create the plot with base settings
+                            let mut plot = Plot::new("btc_price_history")
                                 .view_aspect(2.5)  // Wider aspect ratio
                                 .height(chart_height)     // Dynamic height based on width
                                 .width(available_width.min(1200.0))      // Use available width with maximum cap
@@ -255,16 +266,32 @@ impl eframe::App for BitcoinApp {
                                 .allow_scroll(true)
                                 .allow_drag(true)
                                 .min_size(egui::vec2(300.0, 150.0)) // Set reasonable minimum size
-                                // .include_y(0.0)    // Always include zero on y-axis
                                 .y_axis_min_width(0.5)   // Make y-axis more visible
                                 .y_axis_label("Price ($)")
                                 .x_axis_label("Time (Local)")
                                 .label_formatter(time_formatter)
-                                .legend(Legend::default().position(Corner::RightTop))
-                                // Set custom bounds for better scaling
-                                .include_y(min_y) // Include minimum y value
-                                .include_y(max_y) // Include maximum y value
-                                .show(ui, |plot_ui| {
+                                .legend(Legend::default().position(Corner::RightTop));
+                                
+                            // Reset the view when timeframe changes
+                            if needs_reset {
+                                // Get the first and last timestamps from our data for auto-ranging
+                                if let (Some((first_time, _)), Some((last_time, _))) = (self.price_history.first(), self.price_history.last()) {
+                                    let start_x = first_time.raw_timestamp as f64;
+                                    let end_x = last_time.raw_timestamp as f64;
+                                    
+                                    // Set the bounds to include the entire data range
+                                    plot = plot.include_x(start_x)
+                                           .include_x(end_x)
+                                           .reset();
+                                }
+                            }
+                            
+                            // Set custom bounds for better y-axis scaling
+                            plot = plot.include_y(min_y) // Include minimum y value
+                                       .include_y(max_y); // Include maximum y value
+                                       
+                            // Show the plot (this consumes plot and returns PlotResponse)
+                            plot.show(ui, |plot_ui| {
                                     // Add the candlestick chart
                                     plot_ui.box_plot(box_plot);
                                     
@@ -291,11 +318,17 @@ impl eframe::App for BitcoinApp {
                                         }
                                     }
                                 });
+                            }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+            
+        // Reset the timeframe_changed flag if it was set
+        if needs_reset {
+            let mut state = self.state.lock().unwrap();
+            state.timeframe_changed = false;
+        }
         
         // Request repaint every second to keep the UI updated
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -411,6 +444,7 @@ fn main() -> Result<(), eframe::Error> {
             let timeframe_24h = MenuItem::with_id("timeframe-24h", "24 Hours (hourly)", true, None);
             let timeframe_week = MenuItem::with_id("timeframe-week", "1 Week (4-hour)", true, None);
             let timeframe_month = MenuItem::with_id("timeframe-month", "1 Month (daily)", true, None);
+            let timeframe_year = MenuItem::with_id("timeframe-year", "1 Year (daily)", true, None);
                 
             let quit_i = MenuItem::with_id("quit-app", "Quit", true, None);
                 
@@ -424,6 +458,7 @@ fn main() -> Result<(), eframe::Error> {
                 &timeframe_24h,
                 &timeframe_week,
                 &timeframe_month,
+                &timeframe_year,
                 &PredefinedMenuItem::separator(),
                 &quit_i,
             ]);
@@ -453,6 +488,7 @@ fn main() -> Result<(), eframe::Error> {
                             let mut state = state_for_menu_events.lock().unwrap();
                             if state.chart_timeframe != ChartTimeframe::Hours24 {
                                 state.chart_timeframe = ChartTimeframe::Hours24;
+                                state.timeframe_changed = true;
                                 // Drop lock before refreshing
                                 drop(state);
                                 refresh_bitcoin_price(state_for_menu_events.clone());
@@ -462,6 +498,7 @@ fn main() -> Result<(), eframe::Error> {
                             let mut state = state_for_menu_events.lock().unwrap();
                             if state.chart_timeframe != ChartTimeframe::Week {
                                 state.chart_timeframe = ChartTimeframe::Week;
+                                state.timeframe_changed = true;
                                 // Drop lock before refreshing
                                 drop(state);
                                 refresh_bitcoin_price(state_for_menu_events.clone());
@@ -471,6 +508,17 @@ fn main() -> Result<(), eframe::Error> {
                             let mut state = state_for_menu_events.lock().unwrap();
                             if state.chart_timeframe != ChartTimeframe::Month {
                                 state.chart_timeframe = ChartTimeframe::Month;
+                                state.timeframe_changed = true;
+                                // Drop lock before refreshing
+                                drop(state);
+                                refresh_bitcoin_price(state_for_menu_events.clone());
+                            }
+                        },
+                        "timeframe-year" => {
+                            let mut state = state_for_menu_events.lock().unwrap();
+                            if state.chart_timeframe != ChartTimeframe::Year {
+                                state.chart_timeframe = ChartTimeframe::Year;
+                                state.timeframe_changed = true;
                                 // Drop lock before refreshing
                                 drop(state);
                                 refresh_bitcoin_price(state_for_menu_events.clone());

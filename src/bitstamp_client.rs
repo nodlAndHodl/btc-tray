@@ -32,6 +32,7 @@ pub enum ChartTimeframe {
     Hours24,
     Week,
     Month,
+    Year,
 }
 
 impl ChartTimeframe {
@@ -40,6 +41,7 @@ impl ChartTimeframe {
             ChartTimeframe::Hours24 => "24 Hours (hourly)",
             ChartTimeframe::Week => "1 Week (4-hour)",
             ChartTimeframe::Month => "1 Month (daily)",
+            ChartTimeframe::Year => "1 Year (daily)",
         }
     }
     
@@ -48,6 +50,7 @@ impl ChartTimeframe {
             ChartTimeframe::Hours24 => (3600, 24),      // 1 hour steps, 24 candles
             ChartTimeframe::Week => (14400, 42),        // 4 hour steps, 42 candles (1 week)
             ChartTimeframe::Month => (86400, 30),       // 24 hour steps, 30 candles (1 month)
+            ChartTimeframe::Year => (86400, 365),       // 1 day steps, 365 candles (1 year)
         }
     }
 }
