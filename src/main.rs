@@ -314,7 +314,7 @@ fn main() -> Result<(), eframe::Error> {
     
     thread::spawn(move || {
         // First try to get historical data
-        if let Ok(historical_data) = fetch_historical_bitcoin_prices(ChartTimeframe::Hours24) {
+        if let Ok(historical_data) = BitstampClient::new().fetch_historical_prices(ChartTimeframe::Hours24) {
             // Print debug info about the data
             print_historical_data(&historical_data);
             
@@ -347,7 +347,7 @@ fn main() -> Result<(), eframe::Error> {
                     // Convert unix timestamp to ISO 8601
                     if let Some(datetime) = Utc.timestamp_opt(timestamp, 0).single() {
                         let rfc3339 = datetime.to_rfc3339();
-                        let formatted_time = format_unix_timestamp(&point.timestamp);
+                        let formatted_time = bitstamp_client::format_unix_timestamp(&point.timestamp);
                         println!("  Formatted time: {}", formatted_time);
                         history.push((TimeInfo {
                             raw_timestamp: timestamp,
@@ -631,7 +631,7 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
                         };
                         
                         // Create human-readable time for debugging
-                        let human_time: String = format_unix_timestamp(&point.timestamp);
+                        let human_time: String = bitstamp_client::format_unix_timestamp(&point.timestamp);
                         
                         history.push((TimeInfo {
                             raw_timestamp: timestamp,
@@ -655,12 +655,3 @@ fn refresh_bitcoin_price(state: Arc<Mutex<BitcoinState>>) {
     }
 }
 
-// Helper function to format Unix timestamp to date-time format (YYYY-MM-DD HH:MM)
-fn format_unix_timestamp(unix_timestamp_str: &str) -> String {
-    bitstamp_client::format_unix_timestamp(unix_timestamp_str)
-}
-
-// Wrapper function for backward compatibility
-fn fetch_historical_bitcoin_prices(timeframe: ChartTimeframe) -> Result<bitstamp_client::BitstampHistoricalData> {
-    BitstampClient::new().fetch_historical_prices(timeframe)
-}
