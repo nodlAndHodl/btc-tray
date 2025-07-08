@@ -1,19 +1,11 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize};
 use chrono::{Utc, TimeZone, DateTime, Local};
+use url::Url;
 
-// Mempool.space API response structures
-#[derive(Debug, Deserialize)]
-pub struct MempoolBlockchainInfo {
-    pub chain: String,
-    pub blocks: u32,
-    pub headers: u32,
-    pub difficulty: f64,
-    pub size_on_disk: u64,
-    pub verification_progress: f64,
-}
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct MempoolBlockInfo {
     pub id: String,
     pub height: u32,
@@ -39,18 +31,10 @@ pub struct MempoolFeeEstimate {
     pub hour_fee: u32,
     #[serde(rename = "economyFee")]
     pub economy_fee: u32,
-    #[serde(rename = "minimumFee")]
-    pub minimum_fee: u32,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MempoolStats {
-    pub funded_txo_count: u64,
-    pub funded_txo_sum: u64,
-    pub spent_txo_count: u64,
-    pub spent_txo_sum: u64,
-    pub tx_count: u64,
-}
+// Default mempool.space API URL
+pub const DEFAULT_MEMPOOL_API_URL: &str = "https://mempool.space/api";
 
 // Mempool API client for handling all API interactions
 pub struct MempoolClient {
@@ -59,16 +43,67 @@ pub struct MempoolClient {
 }
 
 impl MempoolClient {
+    /// Create a new MempoolClient with default mempool.space API URL
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::with_url(DEFAULT_MEMPOOL_API_URL)
+    }
+    
+    /// Create a new MempoolClient with a custom API URL
+    pub fn with_url(base_url: &str) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10)) // 10 second timeout
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        
+        // Normalize the URL to ensure it doesn't end with a slash
+        let normalized_url = Self::normalize_url(base_url);
             
         MempoolClient {
             client,
-            base_url: "https://mempool.space/api".to_string(),
+            base_url: normalized_url,
         }
+    }
+    
+    /// Normalize a URL to ensure it's properly formatted
+    /// - Validates that the URL is valid
+    /// - Removes trailing slashes
+    /// - Ensures the URL has a scheme (http/https)
+    pub fn normalize_url(input_url: &str) -> String {
+        // Try to parse the URL
+        let parsed_url = match Url::parse(input_url) {
+            Ok(url) => url,
+            Err(_) => {
+                // If parsing fails, try adding https:// prefix and parse again
+                match Url::parse(&format!("https://{}", input_url)) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        // If still fails, just return the original URL
+                        // The API calls will likely fail, but we won't crash here
+                        return input_url.to_string();
+                    }
+                }
+            }
+        };
+        
+        // Get the URL without the trailing slash
+        let mut normalized = parsed_url.to_string();
+        if normalized.ends_with('/') {
+            normalized.pop(); // Remove trailing slash
+        }
+        
+        // If the URL doesn't end with "/api", append it
+        if !normalized.ends_with("/api") {
+            normalized = format!("{}/api", normalized);
+        }
+        
+        normalized
+    }
+    
+    /// Get the current base URL
+    #[allow(dead_code)]
+    pub fn get_base_url(&self) -> &str {
+        &self.base_url
     }
 
     pub fn fetch_latest_block(&self) -> Result<MempoolBlockInfo> {

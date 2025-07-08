@@ -31,6 +31,12 @@ egui_plot = "0.32.1" # For plotting charts
 # For time formatting
 chrono = "0.4"
 
+# For URL parsing and validation
+url = "2.5.0"
+
+# For finding user config directory
+dirs = "5.0.1"
+
 # MacOS-specific dependencies
 [target."cfg(target_os = \"macos\")".dependencies]
 objc2 = "0.6"
