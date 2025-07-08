@@ -15,10 +15,12 @@ use tray_icon::{
 use eframe::egui;
 
 mod bitstamp_client;
-use bitstamp_client::{BitstampClient, ChartTimeframe};
-
 mod mempool_client;
-use mempool_client::MempoolClient;
+mod config;
+
+use bitstamp_client::{BitstampClient, ChartTimeframe};
+use mempool_client::{MempoolClient};
+use config::{AppConfig, DEFAULT_MEMPOOL_API_URL};
 
 // For debugging
 fn print_historical_data(data: &bitstamp_client::BitstampHistoricalData) {
@@ -34,21 +36,21 @@ struct BitcoinState {
     updating: bool,
     // Add a flag to indicate when a new price has been fetched
     new_price_fetched: bool,
-    // Store historical data as OHLC (Open, High, Low, Close)
     historical_data: Vec<(TimeInfo, CandleData)>,
-    // Current chart timeframe
     chart_timeframe: ChartTimeframe,
-    // Flag to indicate when timeframe has been changed
     timeframe_changed: bool,
-    // Mempool data
     block_height: u32,
     block_time: String,
     fastest_fee: u32,
     half_hour_fee: u32,
     hour_fee: u32,
     economy_fee: u32,
+    minimum_fee: u32,
     mempool_updating: bool,
     mempool_last_updated: String,
+    mempool_api_url: String,
+    mempool_custom_url_enabled: bool,
+    config: AppConfig,
 }
 
 // Structure to hold candlestick data
@@ -75,35 +77,85 @@ impl std::fmt::Display for TimeInfo {
 
 impl BitcoinState {
     fn new() -> Self {
+        // Load configuration from file
+        let config = AppConfig::load();
+        
         BitcoinState {
             price: 0.0,
-            last_updated: String::new(),
+            last_updated: "Never".to_string(),
             updating: false,
             new_price_fetched: false,
             historical_data: Vec::new(),
             chart_timeframe: ChartTimeframe::Hours24,
             timeframe_changed: false,
             block_height: 0,
-            block_time: String::new(),
+            block_time: "Unknown".to_string(),
             fastest_fee: 0,
             half_hour_fee: 0,
             hour_fee: 0,
             economy_fee: 0,
+            minimum_fee: 0,
             mempool_updating: false,
-            mempool_last_updated: String::new(),
+            mempool_last_updated: "Never".to_string(),
+            mempool_api_url: config.mempool_api_url.clone(),
+            mempool_custom_url_enabled: config.mempool_custom_url_enabled,
+            config,
+        }
+    }
+    
+    // Set a custom mempool API URL
+    fn set_mempool_api_url(&mut self, url: &str) {
+        self.mempool_api_url = url.to_string();
+        self.config.mempool_api_url = url.to_string();
+        if let Err(e) = self.config.save() {
+            eprintln!("Failed to save config: {}", e);
+        }
+    }
+    
+    // Enable or disable custom mempool URL
+    fn set_custom_mempool_enabled(&mut self, enabled: bool) {
+        self.mempool_custom_url_enabled = enabled;
+        self.config.mempool_custom_url_enabled = enabled;
+        if let Err(e) = self.config.save() {
+            eprintln!("Failed to save config: {}", e);
+        }
+    }
+    
+    // Get the current mempool API URL to use
+    fn get_active_mempool_url(&self) -> &str {
+        if self.mempool_custom_url_enabled {
+            &self.mempool_api_url
+        } else {
+            DEFAULT_MEMPOOL_API_URL
         }
     }
 }
+
 struct BitcoinApp {
     state: Arc<Mutex<BitcoinState>>,
     price_history: Vec<(TimeInfo, CandleData)>,
+    // UI state
+    show_settings: bool,
+    mempool_url_input: String,
 }
 
 impl BitcoinApp {
     fn new(state: Arc<Mutex<BitcoinState>>) -> Self {
-        Self {
+        let price_history = {
+            let state = state.lock().unwrap();
+            state.historical_data.clone()
+        };
+        
+        let mempool_url = {
+            let state = state.lock().unwrap();
+            state.mempool_api_url.clone()
+        };
+        
+        BitcoinApp {
             state,
-            price_history: Vec::new(),
+            price_history,
+            show_settings: false,
+            mempool_url_input: mempool_url,
         }
     }
 
@@ -155,6 +207,76 @@ impl eframe::App for BitcoinApp {
             state.timeframe_changed
         };
         
+        // Menu bar with settings
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("Settings", |ui| {
+                    if ui.button("Mempool Configuration").clicked() {
+                        self.show_settings = !self.show_settings;
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+        
+        // Settings window
+        if self.show_settings {
+            egui::Window::new("Mempool Configuration")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let mut state = self.state.lock().unwrap();
+                    
+                    // Custom URL toggle
+                    let mut custom_enabled = state.mempool_custom_url_enabled;
+                    ui.checkbox(&mut custom_enabled, "Use custom mempool instance");
+                    if custom_enabled != state.mempool_custom_url_enabled {
+                        state.set_custom_mempool_enabled(custom_enabled);
+                    }
+                    
+                    // Custom URL input field
+                    ui.horizontal(|ui| {
+                        ui.label("Mempool API URL:");
+                        ui.add_enabled(custom_enabled, egui::TextEdit::singleline(&mut self.mempool_url_input));
+                    });
+                    
+                    // Apply button
+                    if ui.add_enabled(custom_enabled, egui::Button::new("Apply")).clicked() {
+                        if !self.mempool_url_input.is_empty() {
+                            state.set_mempool_api_url(&self.mempool_url_input);
+                            
+                            // Refresh mempool data with new URL
+                            let state_clone = self.state.clone();
+                            std::thread::spawn(move || {
+                                refresh_mempool_data(state_clone);
+                            });
+                        }
+                    }
+                    
+                    // Reset to default button
+                    if ui.button("Reset to Default").clicked() {
+                        state.set_custom_mempool_enabled(false);
+                        self.mempool_url_input = DEFAULT_MEMPOOL_API_URL.to_string();
+                        
+                        // Refresh mempool data with default URL
+                        let state_clone = self.state.clone();
+                        std::thread::spawn(move || {
+                            refresh_mempool_data(state_clone);
+                        });
+                    }
+                    
+                    // Current status
+                    ui.separator();
+                    ui.label(format!("Currently using: {}", state.get_active_mempool_url()));
+                    
+                    // Close button
+                    if ui.button("Close").clicked() {
+                        self.show_settings = false;
+                    }
+                });
+        }
+        
+        // Top panel for mempool info
         egui::TopBottomPanel::top("mempool_info").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let state = self.state.lock().unwrap();
@@ -388,7 +510,7 @@ fn main() -> Result<(), eframe::Error> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/icon.png");
     let icon = load_icon(std::path::Path::new(path));
     
-    let options = eframe::NativeOptions {
+    let _options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
             .with_resizable(true),
@@ -692,14 +814,21 @@ fn get_current_timestamp() -> String {
 // Helper function to refresh mempool data
 fn refresh_mempool_data(state: Arc<Mutex<BitcoinState>>) {
     println!("Refreshing mempool data...");
-    // Mark as updating
+    
+    // Get the configured mempool URL
+    let mempool_url = {
+        let state = state.lock().unwrap();
+        state.get_active_mempool_url().to_string()
+    };
+    
+    // Update state to indicate we're updating
     {
         let mut state = state.lock().unwrap();
         state.mempool_updating = true;
     }
     
-    // Create a reusable API client
-    let client = MempoolClient::new();
+    // Create client with the configured URL
+    let client = MempoolClient::with_url(&mempool_url);
     
     // Fetch latest block info
     match client.fetch_latest_block() {
