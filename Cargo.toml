@@ -2,8 +2,8 @@
 name = "btc-ticker"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name"]
-description = "A simple tray icon application"
+authors = ["Nick"]
+description = "A tray application for Bitcoin metrics"
 
 [dependencies]
 tray-icon = "0.21.0"
@@ -14,7 +14,7 @@ image = "0.25.5"
 crossbeam-channel = "0.5"
 
 # For HTTP requests
-reqwest = { version = "0.11", features = ["blocking", "json"] }
+reqwest = { version = "0.12.20", features = ["blocking", "json"] }
 
 # For JSON parsing
 serde = { version = "1.0", features = ["derive"] }
@@ -24,8 +24,9 @@ serde_json = "1.0"
 anyhow = "1.0"
 
 # GUI dependencies
-eframe = "0.27.0" # egui framework wrapper
-egui = "0.27.0"  # immediate mode GUI library
+eframe = "0.31.0" # egui framework wrapper
+egui = "0.31.0"  # immediate mode GUI library
+egui_plot = "0.32.1" # For plotting charts
 
 # For time formatting
 chrono = "0.4"
