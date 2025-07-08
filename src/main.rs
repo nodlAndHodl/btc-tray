@@ -17,6 +17,9 @@ use eframe::egui;
 mod bitstamp_client;
 use bitstamp_client::{BitstampClient, ChartTimeframe};
 
+mod mempool_client;
+use mempool_client::MempoolClient;
+
 // For debugging
 fn print_historical_data(data: &bitstamp_client::BitstampHistoricalData) {
     for (i, point) in data.data.ohlc.iter().enumerate().take(5) {
@@ -37,6 +40,15 @@ struct BitcoinState {
     chart_timeframe: ChartTimeframe,
     // Flag to indicate when timeframe has been changed
     timeframe_changed: bool,
+    // Mempool data
+    block_height: u32,
+    block_time: String,
+    fastest_fee: u32,
+    half_hour_fee: u32,
+    hour_fee: u32,
+    economy_fee: u32,
+    mempool_updating: bool,
+    mempool_last_updated: String,
 }
 
 // Structure to hold candlestick data
@@ -51,9 +63,9 @@ struct CandleData {
 // Structure to hold formatted timestamp info
 #[derive(Debug, Clone)]
 struct TimeInfo {
-    raw_timestamp: i64,     
-    formatted_time: String, 
-    rfc3339: String,        
+    raw_timestamp: i64,     // Unix timestamp (seconds since epoch)
+    formatted_time: String, // Formatted time string
+    rfc3339: String,        // ISO 8601 timestamp
 }
 impl std::fmt::Display for TimeInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -71,6 +83,14 @@ impl BitcoinState {
             historical_data: Vec::new(),
             chart_timeframe: ChartTimeframe::Hours24,
             timeframe_changed: false,
+            block_height: 0,
+            block_time: String::new(),
+            fastest_fee: 0,
+            half_hour_fee: 0,
+            hour_fee: 0,
+            economy_fee: 0,
+            mempool_updating: false,
+            mempool_last_updated: String::new(),
         }
     }
 }
@@ -134,6 +154,35 @@ impl eframe::App for BitcoinApp {
             let state = self.state.lock().unwrap();
             state.timeframe_changed
         };
+        
+        egui::TopBottomPanel::top("mempool_info").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let state = self.state.lock().unwrap();
+                
+                ui.vertical(|ui| {
+                    ui.heading("Bitcoin Network");
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Block Height: {}", state.block_height));
+                        ui.label("|");
+                        ui.label(format!("Block Time: {}", state.block_time));
+                        ui.label("|");
+                        ui.label(format!("Last Updated: {}", state.mempool_last_updated));
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Fees (sat/vB):");
+                        ui.label(format!("Fastest: {}", state.fastest_fee));
+                        ui.label("|");
+                        ui.label(format!("30m: {}", state.half_hour_fee));
+                        ui.label("|");
+                        ui.label(format!("1h: {}", state.hour_fee));
+                        ui.label("|");
+                        ui.label(format!("Economy: {}", state.economy_fee));
+                    });
+                });
+            });
+            ui.separator();
+        });
         
         egui::CentralPanel::default().show(ctx, |ui| {
             
@@ -338,11 +387,18 @@ impl eframe::App for BitcoinApp {
 fn main() -> Result<(), eframe::Error> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/icon.png");
     let icon = load_icon(std::path::Path::new(path));
-
+    
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 600.0])
+            .with_resizable(true),
+        ..Default::default()
+    };
+    
     // Create shared state
     let bitcoin_state = Arc::new(Mutex::new(BitcoinState::new()));
     
-    // Fetch historical data and initial price
+        // Fetch historical data and initial price
     let init_state = bitcoin_state.clone();
     
     thread::spawn(move || {
@@ -409,9 +465,8 @@ fn main() -> Result<(), eframe::Error> {
                 }
             }
         }
-        
-        // Then get the current price
-        refresh_bitcoin_price(init_state);
+        refresh_bitcoin_price(init_state.clone());
+        refresh_mempool_data(init_state);
     });
 
     // Set up a periodic timer for price updates
@@ -420,6 +475,15 @@ fn main() -> Result<(), eframe::Error> {
         loop {
             thread::sleep(Duration::from_secs(60)); // Update every minute
             refresh_bitcoin_price(timer_state.clone());
+        }
+    });
+    
+    // Set up a periodic timer for mempool data updates
+    let mempool_timer_state = bitcoin_state.clone();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(120)); // Update every 2 minutes
+            refresh_mempool_data(mempool_timer_state.clone());
         }
     });
 
@@ -439,6 +503,7 @@ fn main() -> Result<(), eframe::Error> {
             // Create menu items with unique identifiers
             // The third parameter is for keyboard shortcuts (Accelerator), not callbacks
             let refresh_i = MenuItem::with_id("refresh-btc", "Refresh BTC Price", true, None);
+            let refresh_mempool = MenuItem::with_id("refresh-mempool", "Refresh Mempool Data", true, None);
                 
             // Add chart timeframe selection options
             let timeframe_24h = MenuItem::with_id("timeframe-24h", "24 Hours (hourly)", true, None);
@@ -454,6 +519,7 @@ fn main() -> Result<(), eframe::Error> {
             // Add items to the menu
             let _ =tray_menu.append_items(&[
                 &refresh_i,
+                &refresh_mempool,
                 &PredefinedMenuItem::separator(),
                 &timeframe_24h,
                 &timeframe_week,
@@ -483,6 +549,9 @@ fn main() -> Result<(), eframe::Error> {
                     match id.as_str() {
                         "refresh-btc" => {
                             refresh_bitcoin_price(state_for_menu_events.clone());
+                        },
+                        "refresh-mempool" => {
+                            refresh_mempool_data(state_for_menu_events.clone());
                         },
                         "timeframe-24h" => {
                             let mut state = state_for_menu_events.lock().unwrap();
@@ -538,9 +607,12 @@ fn main() -> Result<(), eframe::Error> {
 
     #[cfg(not(target_os = "linux"))]
     {
+        use std::rc::Rc;
+        use std::cell::RefCell;
+        use tray_icon::menu::Menu;
+        
         let mut _tray_icon = Rc::new(RefCell::new(None));
         let tray_c = _tray_icon.clone();
-        let refresh_state = bitcoin_state.clone();
     }
 
     // Run the egui application
@@ -568,12 +640,21 @@ fn main() -> Result<(), eframe::Error> {
                     });
                 })));
                 
+                // Create mempool refresh menu item
+                let mempool_state = app_state.clone();
+                let mempool_i = MenuItem::new("Refresh Mempool Data", true, Some(Box::new(move || {
+                    let state = mempool_state.clone();
+                    thread::spawn(move || {
+                        refresh_mempool_data(state);
+                    });
+                })));
+                
                 // Create quit menu item with direct callback
                 let quit_i = MenuItem::new("Quit", true, Some(Box::new(|| {
                     std::process::exit(0);
                 })));
                 
-                let _ = menu.append_items(&[&refresh_i, &quit_i]);
+                let _ = menu.append_items(&[&refresh_i, &mempool_i, &quit_i]);
                 
                 // Create the tray icon
                 tray_c
@@ -606,6 +687,51 @@ fn load_icon(path: &std::path::Path) -> tray_icon::Icon {
 fn get_current_timestamp() -> String {
     let dt = chrono::Local::now();
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+// Helper function to refresh mempool data
+fn refresh_mempool_data(state: Arc<Mutex<BitcoinState>>) {
+    println!("Refreshing mempool data...");
+    // Mark as updating
+    {
+        let mut state = state.lock().unwrap();
+        state.mempool_updating = true;
+    }
+    
+    // Create a reusable API client
+    let client = MempoolClient::new();
+    
+    // Fetch latest block info
+    match client.fetch_latest_block() {
+        Ok(block_info) => {
+            println!("Updated block height: {}", block_info.height);
+            let mut state = state.lock().unwrap();
+            state.block_height = block_info.height;
+            state.block_time = mempool_client::format_unix_timestamp(block_info.timestamp);
+        },
+        Err(e) => {
+            eprintln!("Failed to fetch block info: {}", e);
+        }
+    }
+    
+    // Fetch fee estimates
+    match client.fetch_fee_estimates() {
+        Ok(fees) => {
+            println!("Updated fee estimates: fastest={} sat/vB", fees.fastest_fee);
+            let mut state = state.lock().unwrap();
+            state.fastest_fee = fees.fastest_fee;
+            state.half_hour_fee = fees.half_hour_fee;
+            state.hour_fee = fees.hour_fee;
+            state.economy_fee = fees.economy_fee;
+            state.mempool_last_updated = get_current_timestamp();
+            state.mempool_updating = false;
+        },
+        Err(e) => {
+            eprintln!("Failed to fetch fee estimates: {}", e);
+            let mut state = state.lock().unwrap();
+            state.mempool_updating = false;
+        }
+    }
 }
 
 // Helper function to refresh Bitcoin price
